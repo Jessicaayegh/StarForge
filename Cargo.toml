@@ -131,7 +131,7 @@ wasm-bindgen = "0.2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 libc = "0.2"
 csv = "1.0"
-minijinja = "1.0"
+minijinja = "2.24"
 serde_yaml = "0.9.34"
 async-trait = "0.1"
 futures = "0.3.33"
