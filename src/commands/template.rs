@@ -1,5 +1,6 @@
 use crate::utils::template_integration;
 use crate::utils::template_performance;
+use crate::utils::template_provenance;
 use crate::utils::{output, print as p, template_customization_ai, templates};
 use anyhow::{Context, Result};
 use clap::Subcommand;
@@ -74,6 +75,10 @@ pub enum TemplateCommands {
         /// Maximum StarForge CLI version supported
         #[arg(long)]
         cli_version_max: Option<String>,
+        /// Sign the imported package with Sigstore keyless signing. Fails when no
+        /// keyless signing environment is available.
+        #[arg(long)]
+        sign: bool,
     },
     /// Publish a template to the local marketplace
     Publish {
@@ -112,6 +117,19 @@ pub enum TemplateCommands {
         /// Extended documentation URL
         #[arg(long)]
         documentation: Option<String>,
+        /// Sign the package with Sigstore keyless signing and record the bundle
+        /// alongside the registry entry. Fails when no keyless signing environment
+        /// (cosign plus an OIDC identity) is available. Without this flag a
+        /// signature is still added whenever one can be produced.
+        #[arg(long)]
+        sign: bool,
+        /// OIDC identity (subject) to bind into the signing certificate, overriding
+        /// the ambient identity.
+        #[arg(long)]
+        identity: Option<String>,
+        /// OIDC issuer matching `--identity`.
+        #[arg(long)]
+        oidc_issuer: Option<String>,
     },
     /// Remove a template from the local marketplace
     Remove {
@@ -142,6 +160,10 @@ pub enum TemplateCommands {
         /// Overwrite the template if it is already installed
         #[arg(long, default_value = "false")]
         force: bool,
+        /// Require the template to carry a verifiable Sigstore signature and
+        /// refuse the install when it does not.
+        #[arg(long)]
+        require_signed: bool,
     },
     /// Update installed templates to their latest versions
     Update {
@@ -219,6 +241,7 @@ pub async fn handle(cmd: TemplateCommands) -> Result<()> {
             version,
             cli_version_min,
             cli_version_max,
+            sign,
         } => {
             import(
                 path,
@@ -229,6 +252,7 @@ pub async fn handle(cmd: TemplateCommands) -> Result<()> {
                 version,
                 cli_version_min,
                 cli_version_max,
+                sign,
             )
             .await
         }
@@ -245,6 +269,9 @@ pub async fn handle(cmd: TemplateCommands) -> Result<()> {
             repository,
             homepage,
             documentation,
+            sign,
+            identity,
+            oidc_issuer,
         } => {
             publish(
                 path,
@@ -259,6 +286,9 @@ pub async fn handle(cmd: TemplateCommands) -> Result<()> {
                 repository,
                 homepage,
                 documentation,
+                sign,
+                identity,
+                oidc_issuer,
             )
             .await
         }
@@ -285,7 +315,20 @@ pub async fn handle(cmd: TemplateCommands) -> Result<()> {
             name,
             version,
             force,
-        } => crate::utils::template::install(source, name, version, force).await,
+            require_signed,
+        } => {
+            // The policy is read deep inside the installer, so expose the flag
+            // as the environment variable it consults for the duration of the
+            // install and restore it afterwards.
+            if require_signed {
+                std::env::set_var(template_provenance::REQUIRE_SIGNED_ENV, "1");
+            }
+            let result = crate::utils::template::install(source, name, version, force).await;
+            if require_signed {
+                std::env::remove_var(template_provenance::REQUIRE_SIGNED_ENV);
+            }
+            result
+        }
         TemplateCommands::Update { name, all } => update(name, all).await,
         TemplateCommands::Rollback { name } => rollback(name).await,
         TemplateCommands::Test { name, verbose } => template_test(name, verbose).await,
@@ -366,6 +409,7 @@ async fn import(
     version: String,
     cli_version_min: Option<String>,
     cli_version_max: Option<String>,
+    sign: bool,
 ) -> Result<()> {
     publish(
         path,
@@ -378,6 +422,9 @@ async fn import(
         cli_version_max,
         None,
         None,
+        None,
+        None,
+        sign,
         None,
         None,
     )
@@ -404,6 +451,9 @@ async fn publish(
     repository: Option<String>,
     homepage: Option<String>,
     documentation: Option<String>,
+    sign: bool,
+    identity: Option<String>,
+    oidc_issuer: Option<String>,
 ) -> Result<()> {
     use dialoguer::{theme::ColorfulTheme, Input};
     let name = match name {
@@ -437,7 +487,7 @@ async fn publish(
         description,
         author,
         tag_list,
-        version,
+        version.clone(),
         cli_version_min,
         cli_version_max,
         license,
@@ -446,7 +496,30 @@ async fn publish(
         documentation,
     )
     .await?;
-    let template = templates::get_template(&name).await?;
+
+    // Sign the package that was just written into the template store. The
+    // bundle is attached to the registry entry so `template install` can check
+    // both who published it and that the bytes did not change.
+    let published =
+        templates::get_template_by_name_and_version(&name, Some(version.as_str())).await?;
+    let signing = template_provenance::SigningConfig {
+        cosign_bin: None,
+        identity,
+        issuer: oidc_issuer,
+    };
+
+    if sign || template_provenance::keyless_signing_available(&signing) {
+        let package_path = published
+            .path
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| path.clone());
+        let provenance = template_provenance::sign_package(&package_path, &signing)?;
+        templates::set_template_provenance(&name, &version, provenance).await?;
+    }
+
+    let template =
+        templates::get_template_by_name_and_version(&name, Some(version.as_str())).await?;
 
     p::header("Template Publish");
     p::success("Template registered successfully");
@@ -464,6 +537,15 @@ async fn publish(
     }
     if let Some(path) = template.path.as_ref() {
         p::kv("Path", path);
+    }
+    match template.provenance.as_ref() {
+        Some(provenance) => {
+            p::kv("Signed by", &provenance.summary());
+            p::kv("Signed digest", &provenance.digest);
+        }
+        None => p::info(
+            "No keyless signing environment detected — the package was published without a Sigstore signature.",
+        ),
     }
 
     Ok(())
@@ -815,6 +897,9 @@ fn print_quality_signals(template: &templates::TemplateEntry) {
         },
     );
     p::kv("Downloads", &template.downloads.to_string());
+    if let Some(provenance) = template.provenance.as_ref() {
+        p::kv("Signed by", &provenance.summary());
+    }
     let badges = template.trust_indicators();
     if !badges.is_empty() {
         p::kv("Trust signals", &badges.join("  "));

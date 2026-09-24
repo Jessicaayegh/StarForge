@@ -1,4 +1,5 @@
 use crate::utils::http_client;
+use crate::utils::template_provenance::{self, TemplateProvenance};
 use crate::utils::template_schema;
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
@@ -202,6 +203,11 @@ pub struct TemplateEntry {
     /// Whether this template has been selected as featured by curators.
     #[serde(default)]
     pub featured: bool,
+    /// Keyless (Sigstore) signature and build provenance for the published
+    /// package, when it was signed at publish time. Installation verifies the
+    /// fetched package against this record before it reaches the user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<TemplateProvenance>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -598,6 +604,9 @@ impl TemplateEntry {
         }
         if self.featured {
             badges.push("[FEATURED]".to_string());
+        }
+        if self.provenance.is_some() {
+            badges.push("[SIGNED]".to_string());
         }
         if self.is_trending() {
             badges.push("[TRENDING]".to_string());
@@ -1544,6 +1553,13 @@ pub fn generate_template_docs(entry: &TemplateEntry) -> String {
         if entry.verified { "yes" } else { "no" }
     ));
     md.push_str(&format!(
+        "- **Signed (Sigstore):** {}\n",
+        match entry.provenance.as_ref() {
+            Some(provenance) => provenance.summary(),
+            None => "no".to_string(),
+        }
+    ));
+    md.push_str(&format!(
         "- **Maintenance:** {}\n",
         entry.maintenance.label()
     ));
@@ -1644,6 +1660,61 @@ pub async fn add_template(entry: TemplateEntry) -> Result<()> {
     Ok(())
 }
 
+/// Attach (or replace) the Sigstore provenance record for a published template.
+///
+/// Called by `starforge template publish` once the package has been signed, so
+/// the bundle travels with the registry entry that `template install` later
+/// reads and verifies.
+pub async fn set_template_provenance(
+    name: &str,
+    version: &str,
+    provenance: TemplateProvenance,
+) -> Result<()> {
+    let mut registry = load_registry().await?;
+    let entry = registry
+        .templates
+        .iter_mut()
+        .find(|t| t.name == name && t.version == version)
+        .ok_or_else(|| anyhow::anyhow!("Template '{}@{}' not found in registry", name, version))?;
+
+    entry.provenance = Some(provenance);
+    save_registry(&registry)
+}
+
+/// Read the provenance record for a template, if it was published signed.
+pub async fn template_provenance_for(
+    name: &str,
+    version: Option<&str>,
+) -> Result<Option<TemplateProvenance>> {
+    let entry = get_template_by_name_and_version(name, version).await?;
+    Ok(entry.provenance)
+}
+
+/// Enforce the signed-templates policy and verify a fetched package against the
+/// provenance recorded in the registry.
+///
+/// Runs after the files are on disk but before the entry is handed back, so a
+/// tampered or unsigned package is rejected instead of being used to scaffold a
+/// project.
+fn verify_entry_provenance(entry: &TemplateEntry, package_path: &Path) -> Result<()> {
+    template_provenance::enforce_signed_policy(entry.provenance.as_ref(), &entry.name)?;
+
+    let Some(provenance) = entry.provenance.as_ref() else {
+        return Ok(());
+    };
+
+    // With the policy active a bundle must be verified cryptographically, not
+    // merely matched for integrity; otherwise an unsigned registry could claim
+    // a bundle it cannot produce.
+    let config = template_provenance::VerifyConfig {
+        require_crypto: template_provenance::require_signed_templates(),
+        cosign_bin: None,
+    };
+
+    template_provenance::verify_provenance(package_path, provenance, &config)?;
+    Ok(())
+}
+
 /// Remove a template from the registry.
 /// If `purge` is true, also deletes any cached/downloaded assets.
 pub async fn remove_template(name: &str, purge: bool) -> Result<()> {
@@ -1722,7 +1793,13 @@ pub fn fetch_template(entry: &TemplateEntry, dest: &Path) -> Result<()> {
         TemplateSource::Git { url, branch } => fetch_git_template(url, branch.as_deref(), dest),
         TemplateSource::Local { path } => fetch_local_template(Path::new(path), dest),
         TemplateSource::Builtin { id } => fetch_builtin_template(id, dest),
-    }
+    }?;
+
+    // Verify the bytes that were just materialized before they are used to
+    // scaffold anything.
+    verify_entry_provenance(entry, dest)?;
+
+    Ok(())
 }
 
 /// Copy a built-in example template (shipped under `templates/examples/<id>`)
@@ -1969,6 +2046,7 @@ pub async fn publish_template_versioned(
         documentation,
         categories: Vec::new(),
         featured: false,
+        provenance: None,
     };
 
     add_template(entry).await?;
@@ -2170,6 +2248,10 @@ async fn install_from_git_url(
     // before anything is fetched or written.
     check_install_name(&name)?;
 
+    // A git URL carries no publisher record or bundle, so the signed-templates
+    // policy rejects it before anything is downloaded.
+    template_provenance::enforce_signed_policy(None, &name)?;
+
     let mut registry = load_registry().await?;
     if registry.templates.iter().any(|t| t.name == name) && !force {
         anyhow::bail!(
@@ -2218,6 +2300,7 @@ async fn install_from_git_url(
         documentation: None,
         categories: Vec::new(),
         featured: false,
+        provenance: None,
     };
 
     registry.templates.retain(|t| t.name != name);
@@ -2243,6 +2326,10 @@ async fn install_from_local_path(
             .to_string()
     });
     check_install_name(&name)?;
+
+    // A directory copied from disk has no publisher record, so the
+    // signed-templates policy rejects it when active.
+    template_provenance::enforce_signed_policy(None, &name)?;
 
     let mut registry = load_registry().await?;
     if registry.templates.iter().any(|t| t.name == name) && !force {
@@ -2291,6 +2378,7 @@ async fn install_from_local_path(
         documentation: None,
         categories: Vec::new(),
         featured: false,
+        provenance: None,
     };
 
     registry.templates.retain(|t| t.name != name);
@@ -2327,6 +2415,11 @@ async fn install_from_registry(
         }
         TemplateSource::Builtin { id } => fetch_builtin_template(id, &dest)?,
     }
+
+    // Verify the fetched bytes against the published provenance before the
+    // template is registered, so a tampered or unsigned package never reaches
+    // `starforge new`.
+    verify_entry_provenance(&entry, &dest)?;
 
     Ok(entry)
 }
@@ -2518,6 +2611,7 @@ mod tests {
             documentation: None,
             categories: Vec::new(),
             featured: false,
+            provenance: None,
         }
     }
 
@@ -3011,6 +3105,7 @@ mod tests {
             documentation: None,
             categories: Vec::new(),
             featured: false,
+            provenance: None,
         });
 
         // Test name search
@@ -3065,6 +3160,7 @@ mod tests {
             documentation: None,
             categories: Vec::new(),
             featured: false,
+            provenance: None,
         };
 
         let dest = tmp.path().join(&entry.name);
@@ -3121,6 +3217,7 @@ mod tests {
             documentation: None,
             categories: Vec::new(),
             featured: false,
+            provenance: None,
         }
     }
 
