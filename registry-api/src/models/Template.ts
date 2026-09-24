@@ -13,6 +13,8 @@ export interface ITemplate {
   repository?: string;
   homepage?: string;
   documentation?: string;
+  /** Markdown README displayed by the public registry portal. */
+  readme?: string;
   downloads: number;
   verified: boolean;
   publisherId: string;
@@ -158,4 +160,3 @@ export class TemplateStore {
     this.templates.clear();
   }
 }
-
