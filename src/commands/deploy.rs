@@ -44,62 +44,10 @@ pub struct DeployArgs {
     /// Skip confirmation prompt
     #[arg(long, default_value = "false")]
     pub yes: bool,
-    /// Execute deployment immediately if Stellar CLI is installed
+    /// Disable plugin lifecycle hooks for this operation (pre-deploy, post-deploy).
+    /// Use when a hook is misbehaving and you need to deploy without it firing.
     #[arg(long, default_value = "false")]
-    pub execute: bool,
-    /// Simulate the deploy transaction using Soroban RPC
-    /// Simulate deploy transaction via Soroban RPC before confirmation
-    #[arg(long, default_value = "false")]
-    pub simulate: bool,
-    /// Dry-run: validate artifact paths, network connectivity, wallet existence,
-    /// and estimate fees without submitting any transaction. Prints a full
-    /// deployment plan and exits. Implies --simulate.
-    #[arg(long, default_value = "false")]
-    pub dry_run: bool,
-    /// Sign deployment with a hardware wallet (Ledger/Trezor)
-    #[arg(long, value_enum)]
-    pub hardware: Option<HardwareWalletKind>,
-    /// HD derivation path for hardware wallet signing
-    #[arg(long, default_value = crate::utils::hardware_wallet::STELLAR_HD_PATH)]
-    pub hd_path: String,
-    /// Disable automatic rollback after a failed executed deploy
-    #[arg(long, default_value = "false")]
-    pub no_auto_rollback: bool,
-    /// Run AI-driven compliance checks before deployment (regulatory, security, best practices)
-    #[arg(long, default_value = "false")]
-    pub compliance: bool,
-    /// Emit a machine-readable JSON object instead of the human-readable deployment report
-    #[arg(long)]
-    pub json: bool,
-    /// Path to organization deploy policy (TOML/YAML). Auto-discovers
-    /// `starforge-deploy-policy.toml` in the current directory when omitted.
-    #[arg(long)]
-    pub policy: Option<PathBuf>,
-    /// Comma-separated checklist item ids satisfied for this deploy (see deploy policy)
-    #[arg(long, value_delimiter = ',')]
-    pub checklist: Option<Vec<String>>,
-}
-
-/// Extract a Soroban contract id (56-char `C…` strkey) from CLI stdout/stderr.
-/// Records a deployment analytics event.
-///
-/// Analytics must never fail a deploy, so a reporting error is logged and
-/// swallowed rather than propagated.
-async fn record_analytics(cmd: analytics_cmds::AnalyticsCommands) {
-    if let Err(e) = analytics_cmds::handle(cmd).await {
-        tracing::debug!("failed to record deployment analytics: {e}");
-    }
-}
-
-fn parse_contract_id_from_stdout(output: &str) -> Option<String> {
-    output.split_whitespace().find_map(|token| {
-        let cleaned = token.trim_matches(|c: char| !c.is_ascii_alphanumeric());
-        if cleaned.len() == 56 && cleaned.starts_with('C') {
-            Some(cleaned.to_string())
-        } else {
-            None
-        }
-    })
+    pub no_hooks: bool,
 }
 
 fn is_wasm_above_size_limit(wasm_size_kb: f64) -> bool {

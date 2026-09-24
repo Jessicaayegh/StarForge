@@ -134,6 +134,8 @@ enum Commands {
     Environment(commands::environment::EnvironmentCommands),
     /// Show starforge config and environment info
     Info,
+    /// Collect environment diagnostics for a bug report
+    BugReport(commands::bug_report::BugReportArgs),
     /// Manage AI prompt templates and versioning
     #[command(subcommand)]
     Prompts(commands::prompts::PromptsCommands),
@@ -481,6 +483,7 @@ async fn run() {
         Commands::Deployments(_) => "deployments",
         Commands::Environment(_) => "environment",
         Commands::Info => "info",
+        Commands::BugReport(_) => "bug-report",
         Commands::Prompts(_) => "prompts",
         Commands::Explain(_) => "explain",
         Commands::Config(_) => "config",
@@ -578,6 +581,7 @@ async fn run() {
         Commands::Deployments(cmd) => commands::deployments::handle(cmd).await,
         Commands::Environment(cmd) => commands::environment::handle(cmd),
         Commands::Info => commands::info::handle().await,
+        Commands::BugReport(args) => commands::bug_report::handle(args).await,
         Commands::Prompts(cmd) => commands::prompts::handle(&cmd).await,
         Commands::Explain(ref cmd) => commands::explain::handle(cmd).await,
         Commands::Config(cmd) => commands::config::handle(cmd).await,
