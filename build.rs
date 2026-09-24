@@ -82,6 +82,8 @@ enum Commands {
     Telemetry,
     #[command(about = "Fetch a transaction for the account")]
     Tx,
+    #[command(about = "SEP-10 web authentication for Stellar anchors")]
+    Sep10,
     #[command(about = "View or switch the active network (testnet/mainnet)")]
     Network,
     #[command(about = "Local Soroban devnet (Docker quickstart)")]
@@ -505,6 +507,13 @@ const MAJOR_SUBCOMMANDS: &[(&str, &[(&str, &str)])] = &[
             ),
         ],
     ),
+    (
+        "sep10",
+        &[(
+            "auth --domain <DOMAIN> --wallet <NAME>",
+            "Authenticate against a SEP-10 server and print the JWT (--verbose, --toml-url)",
+        )],
+    ),
 ];
 
 const SUBCOMMAND_INFO: &[(&str, &str)] = &[
@@ -646,6 +655,7 @@ const SUBCOMMAND_INFO: &[(&str, &str)] = &[
         "Contract health monitoring and alerting",
     ),
     ("man", "Generate or install man pages"),
+    ("sep10", "SEP-10 web authentication for Stellar anchors"),
 ];
 
 /// Render `docs/COMMAND_CHEATSHEET.md` from the clap `Command` tree so the
