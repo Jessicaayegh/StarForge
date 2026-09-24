@@ -83,6 +83,7 @@ Global options: `--json`, `--quiet`/`-q`, `--log-format`, `--log-dir`, `--correl
 | `registry` | Interact with the remote template registry |
 | `schedule` | Schedule deployments for future execution with approval workflows |
 | `security` | Security hardening, validation, and monitoring |
+| `sep10` | SEP-10 web authentication (anchor auth testing) |
 | `shell` | Interactive REPL for local Soroban contract testing |
 | `simulate` | Local network simulation and testing environment |
 | `telemetry` | Manage telemetry settings directly |
@@ -145,6 +146,12 @@ Global options: `--json`, `--quiet`/`-q`, `--log-format`, `--log-dir`, `--correl
 | `switch <NAME>` | Switch the active network (testnet, mainnet, custom) |
 | `add` | Add a custom network endpoint |
 | `test` | Test connectivity to a network |
+
+## `sep10` subcommands
+
+| Subcommand | Description |
+|---|---|
+| `auth <--domain <HOME_DOMAIN>> <--wallet <NAME>>` | Validate, sign, and exchange a SEP-10 challenge for a session JWT |
 
 ## `config` subcommands
 

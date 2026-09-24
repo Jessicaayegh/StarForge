@@ -152,6 +152,10 @@ enum Commands {
 
     Tx(commands::tx::TxArgs), // fetch transaction for the account
 
+    /// SEP-10 web authentication (anchor auth testing)
+    #[command(subcommand)]
+    Sep10(commands::sep10::Sep10Commands),
+
     /// View or switch the active network (testnet/mainnet)
     #[command(subcommand)]
     Network(commands::network::NetworkCommands),
@@ -489,6 +493,7 @@ async fn run() {
         Commands::Config(_) => "config",
         Commands::Telemetry(_) => "telemetry",
         Commands::Tx(_) => "tx",
+        Commands::Sep10(_) => "sep10",
         Commands::Network(_) => "network",
         Commands::Node(_) => "node",
         Commands::Completions(_) => "completions",
@@ -587,6 +592,7 @@ async fn run() {
         Commands::Config(cmd) => commands::config::handle(cmd).await,
         Commands::Telemetry(cmd) => commands::telemetry::handle(cmd).await,
         Commands::Tx(args) => commands::tx::handle(args).await,
+        Commands::Sep10(cmd) => commands::sep10::handle(cmd).await,
         Commands::Network(cmd) => commands::network::handle(cmd).await,
         Commands::Node(cmd) => commands::node::handle(cmd).await,
         Commands::Completions(shell) => commands::completions::handle(shell).await,
