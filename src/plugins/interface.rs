@@ -80,10 +80,16 @@ pub struct HookResult {
 
 impl HookResult {
     pub fn success() -> Self {
-        Self { ok: true, message: None }
+        Self {
+            ok: true,
+            message: None,
+        }
     }
     pub fn failure(msg: impl Into<String>) -> Self {
-        Self { ok: false, message: Some(msg.into()) }
+        Self {
+            ok: false,
+            message: Some(msg.into()),
+        }
     }
 }
 
