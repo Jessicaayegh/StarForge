@@ -91,7 +91,7 @@ colored  = "=2.1.0"
 comfy-table  = "=8.0.0"
 dirs     = "=5.0.1"
 anyhow   = "1.0"
-thiserror = "1.0"
+thiserror = "2.0"
 chrono   = { version = "0.4", features = ["serde"] }
 rand     = "0.8"
 ed25519-dalek = ">=2.1.1, <3"
