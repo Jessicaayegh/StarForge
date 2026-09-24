@@ -32,7 +32,10 @@ pub fn handle(args: BugReportArgs) -> Result<()> {
             eprintln!("--output url is not yet implemented; printing markdown instead.");
             println!("{}", report);
         }
-        other => anyhow::bail!("Unknown output format {:?}. Use 'markdown' or 'url'.", other),
+        other => anyhow::bail!(
+            "Unknown output format {:?}. Use 'markdown' or 'url'.",
+            other
+        ),
     }
 
     Ok(())

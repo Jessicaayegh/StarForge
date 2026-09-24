@@ -143,8 +143,14 @@ fn no_color_env_enables_plain_mode_without_the_flag() {
     assert_success(&output, "starforge config db init with NO_COLOR=1");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("[OK]"), "NO_COLOR must trigger the same plain output: {stdout:?}");
-    assert!(!stdout.contains('\u{1b}'), "NO_COLOR must suppress ANSI escapes: {stdout:?}");
+    assert!(
+        stdout.contains("[OK]"),
+        "NO_COLOR must trigger the same plain output: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains('\u{1b}'),
+        "NO_COLOR must suppress ANSI escapes: {stdout:?}"
+    );
 }
 
 #[test]
@@ -161,7 +167,10 @@ fn without_plain_or_no_color_the_decorative_symbol_is_used() {
     // this only asserts the *symbol* choice, not color: the plain-mode
     // ASCII label must not appear when nothing asked for plain mode.
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains('✓'), "default mode must use the decorative symbol: {stdout:?}");
+    assert!(
+        stdout.contains('✓'),
+        "default mode must use the decorative symbol: {stdout:?}"
+    );
     assert!(
         !stdout.contains("[OK]"),
         "default mode must not fall back to the plain-mode label: {stdout:?}"

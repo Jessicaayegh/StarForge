@@ -261,12 +261,21 @@ impl RegistryClient {
         }
         let resp = req.send().await?;
         if !resp.status().is_success() {
-            anyhow::bail!("Organization creation failed with status {}: {}", resp.status(), resp.text().await.unwrap_or_default());
+            anyhow::bail!(
+                "Organization creation failed with status {}: {}",
+                resp.status(),
+                resp.text().await.unwrap_or_default()
+            );
         }
         Ok(())
     }
 
-    pub async fn add_organization_member(&self, slug: &str, username: &str, role: &str) -> Result<()> {
+    pub async fn add_organization_member(
+        &self,
+        slug: &str,
+        username: &str,
+        role: &str,
+    ) -> Result<()> {
         let url = format!("{}/api/orgs/{}/members", self.registry_url, slug);
         let body = serde_json::json!({ "username": username, "role": role });
         let mut req = http_client::get_client().post(&url).json(&body);
@@ -275,7 +284,11 @@ impl RegistryClient {
         }
         let resp = req.send().await?;
         if !resp.status().is_success() {
-            anyhow::bail!("Adding organization member failed with status {}: {}", resp.status(), resp.text().await.unwrap_or_default());
+            anyhow::bail!(
+                "Adding organization member failed with status {}: {}",
+                resp.status(),
+                resp.text().await.unwrap_or_default()
+            );
         }
         Ok(())
     }

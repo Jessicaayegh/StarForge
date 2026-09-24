@@ -681,8 +681,11 @@ pub async fn handle(args: DeployArgs) -> Result<()> {
     }
 
     {
-        let report =
-            wasm_preflight::validate_wasm_bytes(&wasm_bytes, &wasm_path.to_string_lossy(), &wasm_policy);
+        let report = wasm_preflight::validate_wasm_bytes(
+            &wasm_bytes,
+            &wasm_path.to_string_lossy(),
+            &wasm_policy,
+        );
         if !report.is_ok() {
             for v in &report.violations {
                 p::warn(&format!("[{}] {}", v.code, v.message));
@@ -696,11 +699,11 @@ pub async fn handle(args: DeployArgs) -> Result<()> {
         for w in &report.warnings {
             p::warn(w);
         }
-        
+
         for f in &report.findings {
             p::warn(&format!("[Finding - {} Risk] {}", f.risk, f.message));
         }
-        
+
         if report.findings.is_empty() {
             completed_checklist.push("wasm_clean_analysis".to_string());
         }
@@ -746,7 +749,11 @@ pub async fn handle(args: DeployArgs) -> Result<()> {
 
     // Enforce organization deploy policy when configured
     if let (Some(path), Some(policy)) = (&policy_path, &org_deploy_policy) {
-        let checklist_override = if completed_checklist.is_empty() { None } else { Some(completed_checklist.clone()) };
+        let checklist_override = if completed_checklist.is_empty() {
+            None
+        } else {
+            Some(completed_checklist.clone())
+        };
         let context = deploy_policy::DeployContext::from_env(&args.network, args.execute)
             .with_overrides(None, checklist_override);
         deploy_policy::enforce(path, policy, &context)?;
@@ -1159,8 +1166,7 @@ mod tests {
 
     #[test]
     fn stellar_deploy_signs_with_identity_name() {
-        let args =
-            build_stellar_deploy_args(std::path::Path::new("c.wasm"), "deployer", "testnet");
+        let args = build_stellar_deploy_args(std::path::Path::new("c.wasm"), "deployer", "testnet");
         let source = args.iter().position(|a| a == "--source").unwrap();
         assert_eq!(args[source + 1], "deployer");
     }

@@ -38,9 +38,15 @@ impl Default for WasmPolicy {
             ],
             required_exports: vec![],
             // By default, we expect typical Soroban single-character module namespaces (plus maybe _).
-            allowed_imports: Some(vec![
-                "a", "b", "c", "d", "e", "f", "g", "h", "i", "l", "m", "p", "r", "s", "t", "u", "v", "x", "z", "_",
-            ].into_iter().map(String::from).collect()),
+            allowed_imports: Some(
+                vec![
+                    "a", "b", "c", "d", "e", "f", "g", "h", "i", "l", "m", "p", "r", "s", "t", "u",
+                    "v", "x", "z", "_",
+                ]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            ),
             allowed_exports: None,
         }
     }
@@ -170,7 +176,9 @@ pub fn validate_wasm_bytes(bytes: &[u8], label: &str, policy: &WasmPolicy) -> Pr
     if let Some(allowed) = &policy.allowed_imports {
         for import in &imports {
             let ns = import.split("::").next().unwrap_or(import);
-            let is_allowed = allowed.iter().any(|a| ns == a || import == a || import.starts_with(&format!("{}::", a)));
+            let is_allowed = allowed
+                .iter()
+                .any(|a| ns == a || import == a || import.starts_with(&format!("{}::", a)));
             if !is_allowed {
                 findings.push(PreflightFinding {
                     risk: "Medium".to_string(),

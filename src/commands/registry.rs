@@ -581,8 +581,14 @@ async fn organization(command: OrganizationCommands) -> Result<()> {
             client.create_organization(&slug, &name).await?;
             p::success(&format!("Organization '{}' created", slug));
         }
-        OrganizationCommands::AddMember { slug, username, role } => {
-            client.add_organization_member(&slug, &username, &role).await?;
+        OrganizationCommands::AddMember {
+            slug,
+            username,
+            role,
+        } => {
+            client
+                .add_organization_member(&slug, &username, &role)
+                .await?;
             p::success(&format!("Added '{}' to '{}' as {}", username, slug, role));
         }
     }
