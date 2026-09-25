@@ -82,6 +82,8 @@ enum Commands {
     Telemetry,
     #[command(about = "Fetch a transaction for the account")]
     Tx,
+    #[command(about = "SEP-10 web authentication (anchor auth testing)")]
+    Sep10,
     #[command(about = "View or switch the active network (testnet/mainnet)")]
     Network,
     #[command(about = "Local Soroban devnet (Docker quickstart)")]
@@ -325,6 +327,15 @@ const MAJOR_SUBCOMMANDS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "sep10",
+        &[
+            (
+                "auth <--domain <HOME_DOMAIN>> <--wallet <NAME>>",
+                "Validate, sign, and exchange a SEP-10 challenge for a session JWT",
+            ),
+        ],
+    ),
+    (
         "config",
         &[
             (
@@ -565,6 +576,10 @@ const SUBCOMMAND_INFO: &[(&str, &str)] = &[
     ),
     ("telemetry", "Manage telemetry settings directly"),
     ("tx", "Fetch transaction for the account"),
+    (
+        "sep10",
+        "SEP-10 web authentication (anchor auth testing)",
+    ),
     (
         "network",
         "View or switch the active network (testnet/mainnet)",

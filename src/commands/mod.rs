@@ -90,6 +90,7 @@ pub mod refactor;
 pub mod registry;
 pub mod schedule;
 pub mod security;
+pub mod sep10;
 pub mod shell;
 pub mod simulate;
 pub mod social;
