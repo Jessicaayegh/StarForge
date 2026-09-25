@@ -57,7 +57,7 @@ router.post(
       );
       if (existing) {
         // Update existing review
-        const updated = await reviewStore.update(existing.id, {
+        await reviewStore.update(existing.id, {
           rating,
           comment,
           updatedAt: new Date(),

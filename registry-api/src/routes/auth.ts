@@ -52,7 +52,7 @@ router.post("/signup", async (req: Request, res: Response) => {
       { id: user.id, email: user.email },
       process.env.JWT_SECRET || "secret",
       {
-        expiresIn: process.env.JWT_EXPIRATION || "7d",
+        expiresIn: (process.env.JWT_EXPIRATION || "7d") as jwt.SignOptions["expiresIn"],
       },
     );
 
@@ -93,7 +93,7 @@ router.post("/login", async (req: Request, res: Response) => {
       { id: user.id, email: user.email },
       process.env.JWT_SECRET || "secret",
       {
-        expiresIn: process.env.JWT_EXPIRATION || "7d",
+        expiresIn: (process.env.JWT_EXPIRATION || "7d") as jwt.SignOptions["expiresIn"],
       },
     );
 

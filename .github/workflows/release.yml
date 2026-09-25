@@ -130,6 +130,7 @@ jobs:
           mkdir -p release-files
           find release-artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec cp {} release-files/ \;
           find release-artifacts -type f -name "checksums.txt" -exec cat {} >> release-files/SHA256SUMS.txt \;
+          cp registry-api/openapi.json release-files/openapi.json
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2

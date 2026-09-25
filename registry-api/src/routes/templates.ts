@@ -1,7 +1,6 @@
 import express, { Request, Response } from "express";
 import { v4 as uuid } from "uuid";
 import { TemplateStore, ITemplate } from "../models/Template";
-import { ReviewStore } from "../models/Review";
 import { searchAnalytics } from "../models/SearchAnalytics";
 import { searchEngine, SearchOptions } from "../services/searchEngine";
 import { verifyToken, optionalAuth } from "../middleware/auth";
@@ -11,7 +10,6 @@ import path from "path";
 
 const router = express.Router();
 const templateStore = new TemplateStore();
-const reviewStore = new ReviewStore();
 
 const STORAGE_DIR = process.env.STORAGE_DIR || "./storage/templates";
 
@@ -499,7 +497,6 @@ router.get(
       await templateStore.incrementDownloads(tpl.id);
       searchAnalytics.recordInteraction(req.userId, tpl.id, "download");
 
-      const fileName = path.basename(tpl.downloadUrl);
       const filePath = path.join(
         STORAGE_DIR,
         `${tpl.name}-${tpl.version}-${tpl.id}.zip`,

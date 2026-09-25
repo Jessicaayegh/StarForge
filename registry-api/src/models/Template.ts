@@ -72,7 +72,7 @@ export class TemplateStore {
     query: string,
     tags?: string[],
     verified?: boolean,
-    minQuality?: number,
+    _minQuality?: number,
   ): Promise<ITemplate[]> {
     const results: ITemplate[] = [];
     const queryLower = query.toLowerCase();
