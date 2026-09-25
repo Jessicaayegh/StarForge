@@ -356,7 +356,7 @@ router.get(
   optionalAuth,
   async (req: Request, res: Response) => {
     try {
-      const { id } = req.params;
+      const id = req.params.id as string;
       const limit = Number(req.query.limit) || 5;
 
       const allTemplates = await templateStore.all();
@@ -387,7 +387,7 @@ router.get(
   optionalAuth,
   async (req: Request, res: Response) => {
     try {
-      const { name } = req.params;
+      const name = req.params.name as string;
       const history = await ownershipHistoryStore.getHistoryForTemplate(name);
       res.json({
         success: true,
@@ -407,7 +407,7 @@ router.get(
   optionalAuth,
   async (req: Request, res: Response) => {
     try {
-      const publisher = decodeURIComponent(req.params.publisher).toLowerCase();
+      const publisher = decodeURIComponent(req.params.publisher as string).toLowerCase();
       const templates = (await templateStore.all()).filter(
         (tpl) => tpl.author.toLowerCase() === publisher || tpl.publisherId.toLowerCase() === publisher,
       );
@@ -442,7 +442,7 @@ router.post(
   mutationRateLimiter,
   async (req: Request, res: Response) => {
     try {
-      const { name } = req.params;
+      const name = req.params.name as string;
       const { new_publisher_id, new_username } = req.body;
 
       if (!new_publisher_id && !new_username) {
@@ -517,7 +517,7 @@ router.get(
   optionalAuth,
   async (req: Request, res: Response) => {
     try {
-      const versions = await templateStore.findByName(req.params.name);
+      const versions = await templateStore.findByName(req.params.name as string);
       if (versions.length === 0) {
         return res.status(404).json({ error: "Template not found" });
       }
@@ -545,7 +545,8 @@ router.get(
   optionalAuth,
   async (req: Request, res: Response) => {
     try {
-      const { name, version } = req.params;
+      const name = req.params.name as string;
+      const version = req.params.version as string;
       const versionQuery = version === "latest" ? undefined : version;
 
       const results = await templateStore.findByName(name);
@@ -684,7 +685,8 @@ router.get(
   optionalAuth,
   async (req: Request, res: Response) => {
     try {
-      const { name, version } = req.params;
+      const name = req.params.name as string;
+      const version = req.params.version as string;
 
       const results = await templateStore.findByName(name);
       const tpl = results.find((t) => t.version === version) || results[0];

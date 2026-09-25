@@ -60,7 +60,7 @@ For contributors, the hash is intentionally defined as the SHA-256 digest of the
 You can install the latest release binary using the installation script:
 
 ```bash
-curl -sL https://raw.githubusercontent.com/Josetic224/StarForge/main/install.sh | bash
+curl -sL https://raw.githubusercontent.com/Nanle-code/StarForge/main/install.sh | bash
 ```
 
 The script automatically:
@@ -72,7 +72,7 @@ The script automatically:
 
 > **Security note**: Never pipe an untrusted script to `bash` without reviewing it first.
 > You can read [`install.sh`](./install.sh) before running it, or download the binary
-> directly from the [Releases page](https://github.com/Josetic224/StarForge/releases) and verify the checksum manually:
+> directly from the [Releases page](https://github.com/Nanle-code/StarForge/releases) and verify the checksum manually:
 >
 > ```bash
 > sha256sum -c SHA256SUMS.txt
@@ -86,7 +86,7 @@ The script automatically:
 | Linux | aarch64 | ✅ |
 | macOS | x86\_64 | ✅ |
 | macOS | aarch64 (Apple Silicon) | ✅ |
-| Windows | x86\_64 | ✅ (`.zip` from [Releases](https://github.com/Josetic224/StarForge/releases)) |
+| Windows | x86\_64 | ✅ (`.zip` from [Releases](https://github.com/Nanle-code/StarForge/releases)) |
 | FreeBSD / other | — | Not supported |
 
 Windows binaries are built and smoke-tested in CI on every push and pull
@@ -101,7 +101,7 @@ Override the default `/usr/local/bin` destination:
 
 ```bash
 INSTALL_DIR="$HOME/.local/bin" \
-  curl -sL https://raw.githubusercontent.com/Josetic224/StarForge/main/install.sh | bash
+  curl -sL https://raw.githubusercontent.com/Nanle-code/StarForge/main/install.sh | bash
 ```
 
 #### Uninstall
@@ -117,7 +117,7 @@ rm -f "$INSTALL_DIR/starforge"
 A draft Homebrew formula is available for testing:
 
 ```bash
-brew install Josetic224/starforge/starforge
+brew install Nanle-code/starforge/starforge
 ```
 
 ### Docker
@@ -172,7 +172,7 @@ every release) before installing, the same as for the tarball archives.
 - Rust >= 1.80 ([install via rustup](https://rustup.rs))
 
 ```bash
-git clone https://github.com/Josetic224/StarForge.git
+git clone https://github.com/Nanle-code/StarForge.git
 cd StarForge
 cargo build --release
 

@@ -267,6 +267,129 @@
         }
       }
     },
+    "/api/templates/{name}": {
+      "get": {
+        "tags": ["Templates"],
+        "summary": "Get template versions and metadata by name",
+        "operationId": "getTemplateByName",
+        "security": [{ "bearerAuth": [] }, {}],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Template versions and latest metadata",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TemplateVersionsResponse" }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/api/templates/{name}/ownership-history": {
+      "get": {
+        "tags": ["Templates"],
+        "summary": "Get template ownership history",
+        "operationId": "getTemplateOwnershipHistory",
+        "security": [{ "bearerAuth": [] }, {}],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ownership history records",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/OwnershipHistoryResponse" }
+              }
+            }
+          },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/api/templates/publishers/{publisher}": {
+      "get": {
+        "tags": ["Templates"],
+        "summary": "Get publisher profile and their published templates",
+        "operationId": "getPublisherProfile",
+        "security": [{ "bearerAuth": [] }, {}],
+        "parameters": [
+          {
+            "name": "publisher",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Publisher profile and templates",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PublisherProfileResponse" }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/api/templates/{name}/transfer-ownership": {
+      "post": {
+        "tags": ["Templates"],
+        "summary": "Transfer template ownership to another publisher",
+        "operationId": "transferTemplateOwnership",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/TransferOwnershipRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Ownership successfully transferred",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TransferOwnershipResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
     "/api/templates/{name}/{version}": {
       "get": {
         "tags": ["Templates"],
@@ -503,6 +626,22 @@
       },
       "InternalError": {
         "description": "The request could not be completed",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "Insufficient permissions to perform this operation",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" }
+          }
+        }
+      },
+      "TooManyRequests": {
+        "description": "Rate limit exceeded",
         "content": {
           "application/json": {
             "schema": { "$ref": "#/components/schemas/Error" }
@@ -767,6 +906,87 @@
         "properties": {
           "success": { "type": "boolean" },
           "message": { "type": "string" }
+        }
+      },
+      "TemplateVersionEntry": {
+        "type": "object",
+        "required": ["version", "created_at", "downloads", "download_url"],
+        "properties": {
+          "version": { "type": "string" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "downloads": { "type": "integer" },
+          "download_url": { "type": "string" }
+        }
+      },
+      "TemplateVersionsResponse": {
+        "type": "object",
+        "required": ["success", "template", "versions"],
+        "properties": {
+          "success": { "type": "boolean" },
+          "template": { "$ref": "#/components/schemas/Template" },
+          "versions": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/TemplateVersionEntry" }
+          }
+        }
+      },
+      "OwnershipRecord": {
+        "type": "object",
+        "required": ["id", "templateId", "templateName", "version", "publisherId", "action", "timestamp"],
+        "properties": {
+          "id": { "type": "string" },
+          "templateId": { "type": "string" },
+          "templateName": { "type": "string" },
+          "version": { "type": "string" },
+          "publisherId": { "type": "string" },
+          "publisherUsername": { "type": "string" },
+          "previousPublisherId": { "type": "string" },
+          "action": { "type": "string", "enum": ["PUBLISH", "TRANSFER_OWNERSHIP", "UPDATE", "UNPUBLISH"] },
+          "timestamp": { "type": "string", "format": "date-time" },
+          "ipAddress": { "type": "string" },
+          "metadata": { "type": "object", "additionalProperties": true }
+        }
+      },
+      "OwnershipHistoryResponse": {
+        "type": "object",
+        "required": ["success", "template_name", "history"],
+        "properties": {
+          "success": { "type": "boolean" },
+          "template_name": { "type": "string" },
+          "history": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/OwnershipRecord" }
+          }
+        }
+      },
+      "TransferOwnershipRequest": {
+        "type": "object",
+        "properties": {
+          "new_publisher_id": { "type": "string" },
+          "new_username": { "type": "string" }
+        }
+      },
+      "TransferOwnershipResponse": {
+        "type": "object",
+        "required": ["success", "message", "new_publisher_id"],
+        "properties": {
+          "success": { "type": "boolean" },
+          "message": { "type": "string" },
+          "new_publisher_id": { "type": "string" }
+        }
+      },
+      "PublisherProfileResponse": {
+        "type": "object",
+        "required": ["success", "publisher", "template_count", "total_downloads", "templates"],
+        "properties": {
+          "success": { "type": "boolean" },
+          "publisher": { "type": "string" },
+          "template_count": { "type": "integer" },
+          "total_downloads": { "type": "integer" },
+          "templates": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Template" }
+          }
         }
       }
     }
