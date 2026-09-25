@@ -133,6 +133,7 @@ pub mod pipeline_builder;
 pub mod print;
 pub mod privacy;
 pub mod profiler;
+pub mod project_config;
 pub mod prompt_manager;
 pub mod quality_analysis;
 pub mod redaction;

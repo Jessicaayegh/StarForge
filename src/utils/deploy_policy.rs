@@ -191,7 +191,8 @@ pub fn write_default_policy(path: &Path) -> Result<()> {
             },
             ChecklistItem {
                 id: "wasm_clean_analysis".into(),
-                description: "WASM preflight analysis passed with no unexpected imports/exports".into(),
+                description: "WASM preflight analysis passed with no unexpected imports/exports"
+                    .into(),
                 required: true,
             },
         ],
@@ -353,6 +354,8 @@ mod tests {
                 required: true,
             }],
             require_execute_flag: true,
+            allowed_wasm_imports: None,
+            allowed_wasm_exports: None,
         };
         let context = DeployContext {
             network: "mainnet".into(),

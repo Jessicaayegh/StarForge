@@ -80,19 +80,43 @@ pub struct HookResult {
 
 impl HookResult {
     pub fn success() -> Self {
-        Self { ok: true, message: None }
+        Self {
+            ok: true,
+            message: None,
+        }
     }
     pub fn failure(msg: impl Into<String>) -> Self {
-        Self { ok: false, message: Some(msg.into()) }
+        Self {
+            ok: false,
+            message: Some(msg.into()),
+        }
     }
 }
 
 // ── Plugin trait ──────────────────────────────────────────────────────────────
 
+/// A command (or subcommand) that a plugin exposes to the StarForge CLI.
+#[derive(Debug, Clone)]
+pub struct PluginCommand {
+    /// The command name users type, e.g. `"defi"` or `"defi swap"`.
+    pub name: String,
+    /// One-line description shown in help and completions.
+    pub description: String,
+}
+
 pub trait Plugin: Any + Send + Sync {
     fn name(&self) -> &'static str;
     fn version(&self) -> &'static str;
     fn description(&self) -> &'static str;
+
+    /// Commands this plugin registers. Defaults to a single top-level command
+    /// named after the plugin itself so existing plugins need no changes.
+    fn commands(&self) -> Vec<PluginCommand> {
+        vec![PluginCommand {
+            name: self.name().to_string(),
+            description: self.description().to_string(),
+        }]
+    }
 
     fn on_load(&self) {}
     fn on_unload(&self) {}
@@ -138,6 +162,24 @@ macro_rules! export_plugin {
 
 pub const RUSTC_VERSION: &str = env!("RUSTC_VERSION");
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Extract the major version component from a semver string (e.g. "1.2.3" → "1").
+/// Returns the full string unchanged if it cannot be parsed.
+fn major(version: &str) -> &str {
+    match version.find('.') {
+        Some(pos) => &version[..pos],
+        None => version,
+    }
+}
+
+/// Returns `true` when `plugin_version` is compatible with the running StarForge core.
+///
+/// Compatibility rule: the **major** version must match exactly. A plugin built
+/// against `0.x.y` is incompatible with a core running `1.x.y`, and vice-versa.
+/// Patch and minor bumps within the same major are considered backwards-compatible.
+pub fn is_core_version_compatible(plugin_version: &str) -> bool {
+    major(plugin_version) == major(CORE_VERSION)
+}
 
 #[cfg(test)]
 mod tests {
