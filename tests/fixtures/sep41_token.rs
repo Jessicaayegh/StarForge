@@ -1,4 +1,16 @@
-#![no_std]
+// Compiled copy of `templates/examples/sep41-token/src/lib.rs` (contract
+// section only) with `{{PROJECT_NAME_PASCAL}}` rendered as `Sep41Token`.
+//
+// It is included by `tests/contract_property_tests.rs` via `#[path]` so the
+// SEP-41 property tests run against the real template logic. The
+// `sep41_fixture_matches_template` test fails if this copy drifts from the
+// template: to regenerate, copy the template's contract section (everything
+// between `#![no_std]` and `#[cfg(test)]`) between the markers below and
+// replace the placeholder.
+//
+// `#![no_std]` is omitted because this file is a module of a std test binary.
+
+// BEGIN TEMPLATE COPY
 //! SEP-41 fungible token contract for Soroban.
 //!
 //! Implements the standard fungible-token interface described in SEP-41:
@@ -70,10 +82,10 @@ fn spend_allowance(env: &Env, from: &Address, spender: &Address, amount: i128) {
 }
 
 #[contract]
-pub struct {{PROJECT_NAME_PASCAL}};
+pub struct Sep41Token;
 
 #[contractimpl]
-impl {{PROJECT_NAME_PASCAL}} {
+impl Sep41Token {
     /// Initialize the token. Can only be called once.
     pub fn initialize(env: Env, admin: Address, decimals: u32, name: String, symbol: String) {
         if env.storage().instance().has(&DataKey::Admin) {
@@ -157,80 +169,4 @@ impl {{PROJECT_NAME_PASCAL}} {
         spend_balance(&env, &from, amount);
     }
 }
-
-#[cfg(test)]
-mod test {
-    use super::*;
-    use soroban_sdk::testutils::Address as _;
-
-    #[test]
-    fn test_mint_transfer_burn() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let admin = Address::generate(&env);
-        let alice = Address::generate(&env);
-        let bob = Address::generate(&env);
-
-        let id = env.register_contract(None, {{PROJECT_NAME_PASCAL}});
-        let client = {{PROJECT_NAME_PASCAL}}Client::new(&env, &id);
-
-        client.initialize(&admin, &7u32, &String::from_str(&env, "MyToken"), &String::from_str(&env, "MTK"));
-        client.mint(&alice, &1000);
-        assert_eq!(client.balance(&alice), 1000);
-
-        client.transfer(&alice, &bob, &400);
-        assert_eq!(client.balance(&alice), 600);
-        assert_eq!(client.balance(&bob), 400);
-
-        client.burn(&alice, &100);
-        assert_eq!(client.balance(&alice), 500);
-    }
-
-    #[test]
-    fn test_approve_transfer_from() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let admin = Address::generate(&env);
-        let alice = Address::generate(&env);
-        let bob = Address::generate(&env);
-        let carol = Address::generate(&env);
-
-        let id = env.register_contract(None, {{PROJECT_NAME_PASCAL}});
-        let client = {{PROJECT_NAME_PASCAL}}Client::new(&env, &id);
-
-        client.initialize(&admin, &7u32, &String::from_str(&env, "MyToken"), &String::from_str(&env, "MTK"));
-        client.mint(&alice, &500);
-        client.approve(&alice, &bob, &200);
-        assert_eq!(client.allowance(&alice, &bob), 200);
-
-        client.transfer_from(&bob, &alice, &carol, &150);
-        assert_eq!(client.balance(&carol), 150);
-        assert_eq!(client.allowance(&alice, &bob), 50);
-
-        client.burn_from(&bob, &alice, &50);
-        assert_eq!(client.balance(&alice), 300);
-        assert_eq!(client.allowance(&alice, &bob), 0);
-    }
-
-    #[test]
-    fn test_negative_amounts_rejected() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let admin = Address::generate(&env);
-        let alice = Address::generate(&env);
-        let bob = Address::generate(&env);
-
-        let id = env.register_contract(None, {{PROJECT_NAME_PASCAL}});
-        let client = {{PROJECT_NAME_PASCAL}}Client::new(&env, &id);
-
-        client.initialize(&admin, &7u32, &String::from_str(&env, "MyToken"), &String::from_str(&env, "MTK"));
-        client.mint(&alice, &100);
-        assert!(client.try_transfer(&alice, &bob, &-1).is_err());
-        assert!(client.try_approve(&alice, &bob, &-1).is_err());
-        assert_eq!(client.balance(&alice), 100);
-        assert_eq!(client.balance(&bob), 0);
-    }
-}
+// END TEMPLATE COPY
