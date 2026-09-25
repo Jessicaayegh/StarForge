@@ -11,7 +11,7 @@ from pathlib import Path
 # Must match the `archive_name`/`archive_ext` matrix in .github/workflows/release.yml.
 # The `darwin` spelling is what install.sh (`uname -s` lowercased) and the
 # Homebrew formula updater download, so it is the canonical name for macOS.
-EXPECTED_ARCHIVES = {
+REQUIRED_ARCHIVES = {
     "starforge-linux-x86_64.tar.gz",
     "starforge-linux-aarch64.tar.gz",
     "starforge-darwin-x86_64.tar.gz",
@@ -21,16 +21,24 @@ EXPECTED_ARCHIVES = {
     "starforge-x86_64.rpm",
 }
 
+SBOM_ARTIFACTS = {
+    "starforge-sbom.cdx.json",
+    "starforge-sbom.spdx.json",
+}
 
-def prepare_release(source: Path, destination: Path) -> list[Path]:
+EXPECTED_ARCHIVES = REQUIRED_ARCHIVES
+
+
+def prepare_release(source: Path, destination: Path, require_sbom: bool = False) -> list[Path]:
     """Copy the expected archives and write a deterministic SHA-256 manifest."""
     if not source.is_dir():
         raise ValueError(f"artifact directory does not exist: {source}")
 
     archives = sorted(path for path in source.rglob("*") if path.is_file())
     archive_names = {path.name for path in archives}
-    unexpected = archive_names - EXPECTED_ARCHIVES
-    missing = EXPECTED_ARCHIVES - archive_names
+    expected = EXPECTED_ARCHIVES | SBOM_ARTIFACTS if require_sbom else EXPECTED_ARCHIVES
+    unexpected = archive_names - EXPECTED_ARCHIVES - SBOM_ARTIFACTS
+    missing = expected - archive_names
     if unexpected:
         raise ValueError(f"unsupported release archives: {', '.join(sorted(unexpected))}")
     if missing:
@@ -60,9 +68,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path, help="directory containing downloaded build artifacts")
     parser.add_argument("destination", type=Path, help="directory for release files")
+    parser.add_argument("--require-sbom", action="store_true", help="require SBOM artifacts to be present")
     args = parser.parse_args()
     try:
-        prepare_release(args.source, args.destination)
+        prepare_release(args.source, args.destination, require_sbom=args.require_sbom)
     except (OSError, ValueError) as error:
         parser.error(str(error))
     return 0
