@@ -693,8 +693,11 @@ pub async fn handle(args: DeployArgs) -> Result<()> {
     }
 
     // Enforce organization deploy policy when configured
-    if let (Some(path), Some(policy)) = (&policy_path, &org_deploy_policy) {
-        let checklist_override = if completed_checklist.is_empty() { None } else { Some(completed_checklist.clone()) };
+    let policy_path = args.policy.clone().or_else(|| {
+        deploy_policy::discover_policy_file(std::env::current_dir().unwrap_or_default().as_path())
+    });
+    if let Some(path) = &policy_path {
+        let policy = deploy_policy::load_policy(path)?;
         let context = deploy_policy::DeployContext::from_env(&args.network, args.execute)
             .with_overrides(None, checklist_override);
         deploy_policy::enforce(path, policy, &context)?;
