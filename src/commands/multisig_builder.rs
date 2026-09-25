@@ -26,6 +26,12 @@ pub enum MultisigCommands {
         /// Transaction network
         #[arg(long, default_value = "testnet")]
         network: String,
+        /// Mandatory timelock delay in seconds before execution is allowed
+        #[arg(long)]
+        timelock_delay: Option<u64>,
+        /// Optional execution window in seconds after unlock
+        #[arg(long)]
+        execution_window: Option<u64>,
     },
     /// Add a signer to proposal
     AddSigner {
@@ -136,7 +142,9 @@ pub async fn handle(cmd: MultisigCommands) -> Result<()> {
             threshold,
             signers,
             network,
-        } => create_proposal(threshold, &signers, &network),
+            timelock_delay,
+            execution_window,
+        } => create_proposal(threshold, &signers, &network, timelock_delay, execution_window),
         MultisigCommands::AddSigner { proposal, signer } => add_signer(&proposal, &signer),
         MultisigCommands::Sign { proposal, signer } => sign_proposal(&proposal, &signer),
         MultisigCommands::View { proposal } => view_proposal(&proposal),
@@ -391,6 +399,36 @@ fn print_proposal_summary(proposal: &multisig::Proposal) {
     );
     println!("  Network:   {}", proposal.network);
     println!("  Status:    {}", proposal.get_status());
+    if let Some(ref tl) = proposal.timelock {
+        println!("  Timelock Delay: {}s", tl.min_delay_seconds);
+        if let Some(ref un) = tl.unlock_at {
+            println!("  Unlock At:      {}", un);
+        }
+        if let Some(ref exp) = tl.expires_at {
+            println!("  Expires At:     {}", exp);
+        }
+        if let Some(status) = proposal.timelock_status() {
+            let status_str = match status {
+                multisig::TimelockExecutionStatus::CollectingSignatures { signed, required } => {
+                    format!("Collecting signatures ({}/{})", signed, required)
+                }
+                multisig::TimelockExecutionStatus::Locked { unlock_at, remaining_seconds } => {
+                    format!("LOCKED (unlocks at {}, {}s remaining)", unlock_at, remaining_seconds)
+                }
+                multisig::TimelockExecutionStatus::ReadyToExecute { expires_at, remaining_window_seconds } => {
+                    if let Some(rem) = remaining_window_seconds {
+                        format!("READY TO EXECUTE (window expires in {}s)", rem)
+                    } else {
+                        "READY TO EXECUTE".to_string()
+                    }
+                }
+                multisig::TimelockExecutionStatus::Expired { expired_at } => {
+                    format!("EXPIRED at {}", expired_at)
+                }
+            };
+            println!("  Execution:      {}", status_str);
+        }
+    }
     println!();
 }
 
@@ -491,22 +529,19 @@ fn check_status(proposal_path: &std::path::Path) -> Result<()> {
 
 fn is_ready(proposal_path: &std::path::Path) -> Result<()> {
     let proposal = load_proposal(proposal_path)?;
-    match multisig::validate_for_submit(&proposal) {
-        Ok(()) => {
-            print!("ready");
-            io::stdout().flush()?;
-            Ok(())
-        }
-        Err(_) => {
-            exit(1);
-        }
+    if multisig::validate_for_submit(&proposal).is_err() || proposal.can_execute().is_err() {
+        exit(1);
     }
+    print!("ready");
+    io::stdout().flush()?;
+    Ok(())
 }
 
 fn submit_proposal(proposal_path: &std::path::Path, network: &str) -> Result<()> {
     let proposal = load_proposal(proposal_path)?;
 
     multisig::validate_for_submit(&proposal)?;
+    proposal.can_execute()?;
 
     p::info(&format!("Submitting proposal to {}", network));
     println!(
