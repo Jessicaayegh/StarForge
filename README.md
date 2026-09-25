@@ -14,7 +14,7 @@ templates, encrypted wallets and deployment safety checks for Stellar.**
 
 **starforge** is a free, open-source command-line toolkit for developers building on the Stellar network. It brings together the most common Stellar and Soroban developer workflows — wallet management, project scaffolding, and contract deployment — into a single fast, ergonomic CLI.
 
-Think of it as the "Hardhat or Foundry" experience for the Stellar ecosystem, built in Rust for speed and reliability.
+It provides a Hardhat/Foundry-like experience for the Stellar ecosystem while prioritizing reproducibility and security.
 
 This project is actively maintained and participates in the [Stellar Wave Program](https://www.drips.network/wave/stellar) on Drips — a monthly open-source contribution sprint where contributors earn rewards for merged pull requests.
 
