@@ -341,7 +341,8 @@ impl PluginManager {
                         detail,
                     });
                 }
-
+                let plugin_core_version = decl.core_version.to_string();
+                for plugin in registrar.plugins {
                     let name = plugin.name().to_string();
                     self.ai_plugins
                         .insert(name, (plugin, plugin_core_version.clone()));
