@@ -327,7 +327,10 @@ const MAJOR_SUBCOMMANDS: &[(&str, &[(&str, &str)])] = &[
     (
         "config",
         &[
-            ("show", "Show current global configuration"),
+            (
+                "show",
+                "Show effective configuration (user config + project lockfile)",
+            ),
             ("set <KEY> <VALUE>", "Set a configuration key/value pair"),
             (
                 "set-encryption",
@@ -372,6 +375,19 @@ const MAJOR_SUBCOMMANDS: &[(&str, &[(&str, &str)])] = &[
             ("analyse <WASM>", "Heuristic gas/cpu report"),
             ("optimize", "Lightweight WASM shrink pass"),
             ("diff <OLD> <NEW>", "Compare estimated costs"),
+        ],
+    ),
+    (
+        "optimize",
+        &[
+            ("analyse <WASM>", "WASM performance issues + score"),
+            (
+                "size --wasm <FILE>",
+                "Section breakdown + size budgets (--budget, --fail-on-overage)",
+            ),
+            ("transform --src <FILE>", "Apply code transformation hints"),
+            ("bench", "Benchmark two WASM binaries"),
+            ("report", "Show the last optimization report"),
         ],
     ),
     (
