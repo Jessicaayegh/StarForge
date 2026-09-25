@@ -1,23 +1,82 @@
-minimum_quality_score = 75
+# StarForge AI Quality Gates Configuration Example
+#
+# This file defines the quality and security thresholds evaluated by:
+#   `starforge ai quality-gate check`
+#
+# Available Presets:
+#   - "conservative": Relaxed thresholds for legacy repos or early-stage development
+#   - "default": Balanced production standard for general Soroban smart contracts
+#   - "strict": High-assurance rules for financial-grade and mainnet-targeted contracts
+#
+# Initialize with a preset using:
+#   `starforge ai quality-gate init --preset strict`
+
+# [Optional] Selected preset metadata
+preset = "default"
+
+# Overall static code quality score (0 to 100)
+minimum_quality_score = 70
+
+# Maximum permitted unchecked unwrap() or expect() calls (0 enforces typed error propagation)
 maximum_unwraps = 0
+
+# Maximum permitted TODO/FIXME markers in production code
 maximum_todos = 0
+
+# Maximum permitted critical or high static security vulnerabilities
 maximum_high_security_findings = 0
-maximum_medium_security_findings = 3
+
+# Maximum permitted medium static security findings
+maximum_medium_security_findings = 5
+
+# Maximum permitted unbounded loops (gas exhaustion hazard)
 maximum_unbounded_loops = 0
+
+# Maximum permitted storage operations inside loops (state bloat & cost hazard)
 maximum_storage_ops_in_loops = 0
-minimum_coverage_percent = 85.0
+
+# Minimum test line/branch coverage percentage (0.0 to 100.0)
+minimum_coverage_percent = 80.0
+
+# Minimum documentation completeness for public contract interfaces (0.0 to 100.0)
 minimum_documentation_percent = 80.0
-maximum_benchmark_ms = 250.0
-allowed_licenses = ["MIT", "Apache-2.0", "BSD-3-Clause"]
+
+# Optional maximum benchmark execution duration in milliseconds (null to skip)
+# maximum_benchmark_ms = 100.0
+
+# Allowed SPDX license identifiers in Cargo.toml
+allowed_licenses = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause"
+]
+
+# Custom validation gates for repository-specific policies
+# Rules supported: "contains", "not_contains", "file_exists", "file_not_exists"
+[[custom_gates]]
+name = "soroban SDK dependency check"
+rule = "contains"
+value = "soroban-sdk"
+required = true
 
 [[custom_gates]]
-name = "security policy"
+name = "security policy presence"
 rule = "file_exists"
 value = "SECURITY.md"
-required = true
+required = false
 
-[[custom_gates]]
-name = "no placeholder secrets"
-rule = "not_contains"
-value = "CHANGE_ME_SECRET"
-required = true
+# -----------------------------------------------------------------------------
+# Preset Summary & Comparison Table
+# -----------------------------------------------------------------------------
+# | Gate Metric                | Conservative | Default | Strict |
+# |----------------------------|--------------|---------|--------|
+# | minimum_quality_score      | 50           | 70      | 90     |
+# | maximum_unwraps            | 10           | 0       | 0      |
+# | maximum_todos              | 10           | 0       | 0      |
+# | maximum_high_security      | 0            | 0       | 0      |
+# | maximum_medium_security    | 10           | 5       | 0      |
+# | maximum_unbounded_loops    | 2            | 0       | 0      |
+# | maximum_storage_in_loops   | 2            | 0       | 0      |
+# | minimum_coverage_percent   | 50.0%        | 80.0%   | 90.0%  |
+# | minimum_doc_percent        | 50.0%        | 80.0%   | 95.0%  |
+# | maximum_benchmark_ms       | null         | null    | 100.0  |

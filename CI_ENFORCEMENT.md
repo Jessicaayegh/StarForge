@@ -12,6 +12,12 @@ StarForge uses an automated CI pipeline to ensure consistent code quality. Every
 4. **Compilation** - Successful builds with no errors
 5. **Tests** - All tests pass without failures
 6. **Smoke Tests** - Basic CLI functionality works end-to-end
+7. **Code Coverage** - LLVM source-based coverage of the full test suite
+8. **Static Analysis** - CodeQL for Rust, TypeScript and the workflows themselves
+
+The complete pipeline (testing, coverage, multi-platform builds, security
+scanning and releases) is mapped in [CI/CD Pipeline Map](#cicd-pipeline-map)
+below.
 
 ---
 
@@ -21,7 +27,12 @@ StarForge uses an automated CI pipeline to ensure consistent code quality. Every
 
 **Purpose**: Ensure all Rust code follows standard formatting conventions  
 **Trigger**: Every push and pull request  
-**Status**: ✅ Required (must pass)
+**Status**: ⚠️ Currently non-blocking. `master` still has unformatted code in
+a handful of files, so the job emits a `rustfmt` warning annotation instead of
+failing. Reformatting everything at once would conflict with every open branch;
+once `cargo fmt --all --check` passes on `master`, the step in `ci.yml` should
+be switched back to a hard gate (the comment in the workflow says how). Please
+still run `cargo fmt --all` on the files you touch.
 
 ```bash
 cargo fmt --all --check
@@ -569,18 +580,78 @@ Document why the rule is suppressed in a comment.
 
 ---
 
+## CI/CD Pipeline Map
+
+Issue #44 asked for a comprehensive pipeline covering testing, coverage,
+multi-platform builds, security scanning and automated releases. This is where
+each of those lives:
+
+| Concern | Workflow | Jobs / notes | Blocking? |
+| --- | --- | --- | --- |
+| Formatting, lint | `ci.yml` | Rustfmt, Clippy (`-D warnings`, all features) | Clippy yes; Rustfmt warns only (see above) |
+| MSRV | `ci.yml` | `cargo check --locked --workspace` on Rust 1.80.0 | yes |
+| Tests (Linux) | `ci.yml` | Build and Test, Doctests, Secure Defaults Audit, Hardware Wallet, Smoke, Docs Cheat Sheet | yes |
+| Tests (macOS, Windows) | `ci.yml` | macOS CLI Tests, Windows CLI Tests | yes |
+| Code coverage | `coverage.yml` | `cargo llvm-cov` over the whole suite: LCOV + JSON + HTML artifact (`coverage-report`), totals in the job summary, optional Codecov upload | Fails if tests fail; a minimum % is enforced only when the `COVERAGE_THRESHOLD` repository variable is set |
+| Property tests, fuzzing, mutation | `fuzzing.yml` | proptest, fuzz harness build, nightly fuzz smoke, weekly cargo-mutants | yes (mutants informational) |
+| Dependency advisories / licenses / sources | `ci.yml` (Cargo Deny), `audit.yml` (Cargo Audit, weekly + PR) | curated exceptions in `deny.toml` / `audit.toml` | yes |
+| Dependency review | `audit.yml` (Dependency Review, PRs only) | GitHub advisory DB diff of the PR | no (`continue-on-error`; cargo-deny/audit are the gate) |
+| SAST | `codeql.yml` | CodeQL for `actions`, `javascript-typescript`, `rust` (weekly + PR) | yes, except `rust` which is informational |
+| Dependency updates | `.github/dependabot.yml` | weekly grouped PRs for cargo, npm (`registry-api/`), GitHub Actions; MSRV-sensitive exact pins ignored | n/a |
+| Release binaries | `release.yml` | Linux x86_64 + aarch64, macOS x86_64 + arm64, Windows x86_64; smoke-tested, packaged, provenance-attested, `SHA256SUMS.txt` | yes |
+| Release publishing | `release.yml` | GitHub Release with generated notes on `v*` tags; Homebrew formula PR | yes |
+| Release dry run | `release.yml` (`workflow_dispatch`) | builds and packages everything and uploads `release-files-dry-run`, without publishing or attesting | n/a |
+| Deployment | `deployment.yml` | manual, environment-protected, reuses `ci.yml` as its quality gate | yes |
+
+### Pipeline conventions
+
+- **Least privilege**: every workflow declares `permissions: contents: read` at
+  the top level; jobs that need more (release publishing, attestations,
+  code-scanning uploads, audit check runs) opt in at the job level.
+- **Concurrency**: superseded runs on pull requests and feature branches are
+  cancelled. Pushes to `master`, releases, and deployments are never cancelled.
+- **Caching**: CI and coverage jobs use `Swatinem/rust-cache`. Release builds
+  and the Docs Cheat Sheet job are deliberately uncached (clean release
+  artifacts; `build.rs` must really run).
+- **Secrets in conditions**: the `secrets` context is not allowed in a step's
+  `if:`, so optional integrations (Slack, Codecov) are exposed through job
+  `env:` and tested as `env.NAME != ''`.
+- **Validation**: workflow changes should pass
+  [`actionlint`](https://github.com/rhysd/actionlint) before they are pushed.
+
+### Cutting a release
+
+1. Optionally run **Release** from the Actions tab (`workflow_dispatch`) on
+   `master` and download `release-files-dry-run` to check the archives and
+   `SHA256SUMS.txt`.
+2. Push a `vX.Y.Z` tag. `release.yml` runs the secure defaults audit, builds
+   all five platform archives, attests them, publishes the GitHub Release, and
+   opens a Homebrew formula PR.
+3. The archive names are fixed (`starforge-{linux,darwin}-{x86_64,aarch64}.tar.gz`,
+   `starforge-windows-x86_64.zip`) because `install.sh` and the Homebrew
+   formula download them by name. `tests/release_artifacts_test.py` fails if
+   the build matrix and `scripts/release_artifacts.py` drift apart.
+
 ## CI Configuration Files
 
 ### Main CI Pipeline
 - Location: `.github/workflows/ci.yml`
-- Triggers: Every push and PR
-- Jobs: fmt, deny, test, smoke
-- Duration: ~2-3 minutes
+- Triggers: Every push and PR (also callable via `workflow_call`)
+- Jobs: fmt, msrv, deny, secure-defaults, doctests, build-and-test,
+  docs-cheatsheet, hardware-wallet, clippy, smoke, cli-macos, cli-windows
+
+### Coverage
+- Location: `.github/workflows/coverage.yml`
+- Local equivalent: `scripts/coverage.sh` or
+  `cargo llvm-cov --locked --html -- --test-threads=1`
 
 ### Dependency Security
-- Managed by: `cargo deny`
-- Config: `deny.toml` (if present)
-- Checked: With `--all-features`
+- Managed by: `cargo deny` (`deny.toml`, checked with `--all-features`) and
+  `cargo audit` (`audit.toml`; the ignore list is duplicated in `audit.yml`)
+- Updates: `.github/dependabot.yml`
+
+### Static Analysis
+- Location: `.github/workflows/codeql.yml`
 
 ---
 
@@ -614,7 +685,7 @@ A: No. All PRs must pass CI to merge. This ensures consistency and prevents brea
 A: Rerun the check via GitHub Actions UI or push a new commit to trigger re-run.
 
 **Q: How often are dependencies updated?**  
-A: `Cargo.lock` pins versions. Dependencies are updated manually via `cargo update` and tested before commit.
+A: `Cargo.lock` pins versions. Dependabot opens grouped weekly update PRs (see `.github/dependabot.yml`), which must pass the same CI, including the MSRV job. Exact-pinned crates are bumped by hand.
 
 **Q: Why test on every push, not just PRs?**  
 A: Catches issues before opening PR, saves review time, and ensures master is always deployable.

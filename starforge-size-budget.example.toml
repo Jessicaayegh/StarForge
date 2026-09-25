@@ -1,0 +1,22 @@
+# WASM size budgets for `starforge optimize size` (#804).
+#
+# Copy to `starforge-size-budget.toml` (or any path) and pass it with
+# `starforge optimize size --wasm contract.wasm --budget starforge-size-budget.toml`.
+# Omitted limits are simply unchecked, except `max_total_bytes`, which
+# defaults to the Soroban 128 KiB on-chain ceiling.
+#
+# Section categories:
+#   code   — function bodies (WASM section id 10)
+#   data   — embedded data / static strings (id 11)
+#   custom — names, producers, debug info (id 0; safe to strip for release)
+#   total  — the whole module, header included
+#
+# Unknown keys are rejected, so typos fail loudly instead of silently
+# leaving a limit unset.
+
+max_total_bytes = 131072   # 128 KiB — the Soroban on-chain ceiling
+
+# Team examples — tighten as your optimization pipeline matures:
+# max_code_bytes = 65536    # 64 KiB of function bodies
+# max_data_bytes = 8192     # 8 KiB of embedded data / error strings
+# max_custom_bytes = 1024   # 1 KiB of names/debug metadata (aim near zero)

@@ -496,10 +496,10 @@ pub async fn handle(args: TestArgs) -> Result<()> {
                         }
                     }
 
-                    let _timings: Vec<crate::utils::crate::utils::test_optimizer::TestCaseTiming> = report
+                    let _timings: Vec<crate::utils::test_optimizer::TestCaseTiming> = report
                         .results
                         .iter()
-                        .map(|r| crate::utils::crate::utils::test_optimizer::TestCaseTiming {
+                        .map(|r| crate::utils::test_optimizer::TestCaseTiming {
                             name: r.test_name.clone(),
                             duration_ms: r.duration_ms,
                             passed: matches!(r.status, test_automation::TestStatus::Passed),
@@ -575,7 +575,7 @@ pub async fn handle(args: TestArgs) -> Result<()> {
             }
             results
                 .iter()
-                .map(|r| crate::utils::crate::utils::test_optimizer::TestCaseTiming {
+                .map(|r| crate::utils::test_optimizer::TestCaseTiming {
                     name: r.name.clone(),
                     duration_ms: r.duration_ms,
                     passed: r.passed,
@@ -593,7 +593,7 @@ pub async fn handle(args: TestArgs) -> Result<()> {
             }
             results
                 .iter()
-                .map(|r| crate::utils::crate::utils::test_optimizer::TestCaseTiming {
+                .map(|r| crate::utils::test_optimizer::TestCaseTiming {
                     name: r.name.clone(),
                     duration_ms: r.duration_ms,
                     passed: r.passed,
@@ -667,14 +667,14 @@ pub async fn handle(args: TestArgs) -> Result<()> {
 
             // Export report
             if let Some(out_path) = &args.optimize_out {
-                crate::utils::crate::utils::test_optimizer::export_optimization_report(&opt_report, out_path)?;
+                crate::utils::test_optimizer::export_optimization_report(&opt_report, out_path)?;
                 p::kv("Optimization report", &out_path.display().to_string());
             }
 
             if args.optimize_html {
                 let html_path = PathBuf::from("ai_test_optimization_report.html");
                 let html =
-                    crate::utils::crate::utils::test_optimizer::render_optimization_html_report(&opt_report);
+                    crate::utils::test_optimizer::render_optimization_html_report(&opt_report);
                 std::fs::write(&html_path, html)?;
                 p::kv("HTML report", &html_path.display().to_string());
             }

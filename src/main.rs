@@ -134,8 +134,6 @@ enum Commands {
     Environment(commands::environment::EnvironmentCommands),
     /// Show starforge config and environment info
     Info,
-    /// Collect environment diagnostics for a bug report
-    BugReport(commands::bug_report::BugReportArgs),
     /// Manage AI prompt templates and versioning
     #[command(subcommand)]
     Prompts(commands::prompts::PromptsCommands),
@@ -151,6 +149,10 @@ enum Commands {
     Telemetry(commands::telemetry::TelemetryCommands),
 
     Tx(commands::tx::TxArgs), // fetch transaction for the account
+
+    /// SEP-10 web authentication (anchor auth testing)
+    #[command(subcommand)]
+    Sep10(commands::sep10::Sep10Commands),
 
     /// View or switch the active network (testnet/mainnet)
     #[command(subcommand)]
@@ -489,6 +491,7 @@ async fn run() {
         Commands::Config(_) => "config",
         Commands::Telemetry(_) => "telemetry",
         Commands::Tx(_) => "tx",
+        Commands::Sep10(_) => "sep10",
         Commands::Network(_) => "network",
         Commands::Node(_) => "node",
         Commands::Completions(_) => "completions",
@@ -531,7 +534,6 @@ async fn run() {
         Commands::Lint(_) => "lint",
         Commands::Man(_) => "man",
         Commands::Diagnostics(_) => "diagnostics",
-        Commands::BugReport(_) => "bug-report",
         Commands::TemplateVcs(_) => "template-vcs",
         Commands::Perf(_) => "perf",
         Commands::AdvancedPerf(_) => "advanced-perf",
@@ -587,6 +589,7 @@ async fn run() {
         Commands::Config(cmd) => commands::config::handle(cmd).await,
         Commands::Telemetry(cmd) => commands::telemetry::handle(cmd).await,
         Commands::Tx(args) => commands::tx::handle(args).await,
+        Commands::Sep10(cmd) => commands::sep10::handle(cmd).await,
         Commands::Network(cmd) => commands::network::handle(cmd).await,
         Commands::Node(cmd) => commands::node::handle(cmd).await,
         Commands::Completions(shell) => commands::completions::handle(shell).await,
@@ -642,7 +645,6 @@ async fn run() {
         Commands::Lint(args) => commands::lint::handle(args).await,
         Commands::Man(cmd) => commands::man::handle(cmd).await,
         Commands::Diagnostics(args) => commands::diagnostics::handle(args),
-        Commands::BugReport(args) => commands::bug_report::handle(args),
         Commands::TemplateVcs(cmd) => commands::template_vcs::handle(cmd).await,
         Commands::Perf(cmd) => commands::perf::handle(cmd).await,
         Commands::AdvancedPerf(cmd) => commands::perf::handle_advanced(cmd).await,

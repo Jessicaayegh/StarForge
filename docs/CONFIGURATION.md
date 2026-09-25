@@ -52,6 +52,51 @@ horizon_url = "https://horizon-staging.example.com"
 soroban_rpc_url = "https://rpc-staging.example.com"
 ```
 
+### Project lockfiles for teams (#805)
+
+For settings a whole team should share, StarForge supports a committed,
+**non-secret** project lockfile named `starforge-project.toml` (see
+`starforge-project.example.toml` at the repository root). Place it anywhere in
+your repository — any `starforge` command run inside the repository tree picks
+it up by walking upwards to the repository root.
+
+```toml
+# starforge-project.toml — commit this
+network = "testnet"
+telemetry_enabled = false
+
+[networks.project-futurenet]
+horizon_url = "https://horizon-futurenet.stellar.org"
+soroban_rpc_url = "https://soroban-futurenet.stellar.org"
+```
+
+Team workflow:
+
+1. Commit `starforge-project.toml` with the networks, feature flags, AI
+   telemetry, and plugin-trust settings your team agrees on.
+2. Each member keeps personal settings (wallets, encryption) in their own
+   `~/.starforge` config as usual.
+3. Commands resolve the **effective** config = user config with project
+   overrides applied — project wins over user, so committed team settings
+   beat personal defaults.
+
+Security model:
+
+- The lockfile schema has **no secret-bearing fields**: there is no way to
+  express wallets or wallet key material, and `deny_unknown_fields` rejects
+  sections like `[wallets]` or `[wallet_encryption]` at load time instead of
+  silently ignoring them.
+- A broken or typo'd lockfile (`feautre_flags = ...`) is a hard load error,
+  never a silent no-op.
+- Per-install identity (`version`, `install_id`) always stays with the user
+  config; the project layer cannot forge it.
+- `starforge config show` tells you which lockfile (if any) is participating,
+  so an override is never mistaken for a personal setting.
+
+Commands that only read configuration use the effective config. Commands
+that write configuration still operate on the user config only — project
+overrides are an input, never something persisted back.
+
 ### Precedence
 
 | Field | Rule |

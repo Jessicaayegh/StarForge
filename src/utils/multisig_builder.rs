@@ -4,7 +4,40 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Time-lock policy settings for delayed multisig execution (#768).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelockPolicy {
+    /// Minimum mandatory delay before execution is allowed (in seconds)
+    pub min_delay_seconds: u64,
+    /// Optional grace period / execution window after unlock before proposal expires (in seconds)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_window_seconds: Option<u64>,
+    /// Calculated timestamp when timelock unlocks (ISO 8601 string)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unlock_at: Option<String>,
+    /// Calculated timestamp when execution window expires (ISO 8601 string)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+
+/// Real-time execution status of a timelocked proposal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum TimelockExecutionStatus {
+    /// Proposal is still collecting signatures
+    CollectingSignatures { signed: u32, required: u32 },
+    /// Required signatures collected, but locked under mandatory delay
+    Locked { unlock_at: String, remaining_seconds: i64 },
+    /// Timelock delay has elapsed; proposal is currently executable
+    ReadyToExecute {
+        expires_at: Option<String>,
+        remaining_window_seconds: Option<i64>,
+    },
+    /// Timelock execution window has expired
+    Expired { expired_at: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Proposal {
     pub id: String,
     pub threshold: u32,
@@ -16,18 +49,20 @@ pub struct Proposal {
     pub metadata: ProposalMetadata,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transaction_xdr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timelock: Option<TimelockPolicy>,
     #[serde(default)]
     pub events: Vec<ProposalEvent>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Signature {
     pub signer: String,
     pub signature: String,
     pub signed_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProposalMetadata {
     pub title: Option<String>,
     pub description: Option<String>,
@@ -38,7 +73,7 @@ pub struct ProposalMetadata {
     pub template: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProposalEvent {
     pub event_type: String,
     pub message: String,
@@ -101,6 +136,7 @@ impl Proposal {
                 template: None,
             },
             transaction_xdr: None,
+            timelock: None,
             events: vec![ProposalEvent {
                 event_type: "created".to_string(),
                 message: "Proposal created".to_string(),
@@ -163,6 +199,113 @@ impl Proposal {
     pub fn is_expired(&self) -> bool {
         is_proposal_expired(self)
     }
+
+    /// Attach or configure a timelock policy on this proposal.
+    pub fn with_timelock(mut self, min_delay_seconds: u64, execution_window_seconds: Option<u64>) -> Self {
+        let now = Utc::now();
+        let unlock_at = now + chrono::Duration::seconds(min_delay_seconds as i64);
+        let expires_at = execution_window_seconds.map(|w| unlock_at + chrono::Duration::seconds(w as i64));
+        self.timelock = Some(TimelockPolicy {
+            min_delay_seconds,
+            execution_window_seconds,
+            unlock_at: Some(unlock_at.to_rfc3339()),
+            expires_at: expires_at.map(|e| e.to_rfc3339()),
+        });
+        self.events.push(ProposalEvent {
+            event_type: "timelock_configured".to_string(),
+            message: format!("Configured timelock with {}s delay", min_delay_seconds),
+            at: Utc::now().to_rfc3339(),
+        });
+        self
+    }
+
+    /// Evaluates current timelock execution status.
+    pub fn timelock_status(&self) -> Option<TimelockExecutionStatus> {
+        let timelock = self.timelock.as_ref()?;
+        if !self.is_complete() {
+            return Some(TimelockExecutionStatus::CollectingSignatures {
+                signed: self.signatures.len() as u32,
+                required: self.threshold,
+            });
+        }
+
+        let now = Utc::now();
+        let unlock_dt = timelock
+            .unlock_at
+            .as_ref()
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&Utc));
+
+        let expire_dt = timelock
+            .expires_at
+            .as_ref()
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&Utc));
+
+        if let Some(unlock) = unlock_dt {
+            if now < unlock {
+                let remaining = (unlock - now).num_seconds();
+                return Some(TimelockExecutionStatus::Locked {
+                    unlock_at: unlock.to_rfc3339(),
+                    remaining_seconds: remaining.max(0),
+                });
+            }
+        }
+
+        if let Some(exp) = expire_dt {
+            if now > exp {
+                return Some(TimelockExecutionStatus::Expired {
+                    expired_at: exp.to_rfc3339(),
+                });
+            } else {
+                let rem_window = (exp - now).num_seconds();
+                return Some(TimelockExecutionStatus::ReadyToExecute {
+                    expires_at: Some(exp.to_rfc3339()),
+                    remaining_window_seconds: Some(rem_window.max(0)),
+                });
+            }
+        }
+
+        Some(TimelockExecutionStatus::ReadyToExecute {
+            expires_at: None,
+            remaining_window_seconds: None,
+        })
+    }
+
+    /// Validates whether this proposal can be executed right now.
+    pub fn can_execute(&self) -> Result<()> {
+        if !self.is_complete() {
+            anyhow::bail!(
+                "Proposal threshold not reached: {}/{} signatures collected",
+                self.signatures.len(),
+                self.threshold
+            );
+        }
+        if self.is_expired() {
+            anyhow::bail!("Proposal has expired");
+        }
+        if let Some(status) = self.timelock_status() {
+            match status {
+                TimelockExecutionStatus::Locked { unlock_at, remaining_seconds } => {
+                    anyhow::bail!(
+                        "Proposal is timelocked until {}. Remaining delay: {}s",
+                        unlock_at,
+                        remaining_seconds
+                    );
+                }
+                TimelockExecutionStatus::Expired { expired_at } => {
+                    anyhow::bail!("Proposal timelock execution window expired at {}", expired_at);
+                }
+                TimelockExecutionStatus::CollectingSignatures { .. } => {
+                    anyhow::bail!("Proposal signatures incomplete");
+                }
+                TimelockExecutionStatus::ReadyToExecute { .. } => Ok(()),
+            }
+        } else {
+            Ok(())
+        }
+    }
+
 }
 
 // ── Proposal validation (#691) ────────────────────────────────────────────────
@@ -389,6 +532,13 @@ pub fn template_definitions() -> Vec<TemplateDefinition> {
             threshold: 3,
             signers: &["ceo", "cfo", "board1", "board2", "board3"],
             description: "3-of-5 Company Signers",
+        },
+        TemplateDefinition {
+            name: "timelocked_vault",
+            transaction_type: "timelocked_governance_action",
+            threshold: 2,
+            signers: &["admin1", "admin2", "guardian"],
+            description: "2-of-3 Timelocked Governance Vault (24h delay)",
         },
         TemplateDefinition {
             name: "dao",

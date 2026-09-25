@@ -14,6 +14,10 @@ A SEP-41 compliant fungible token contract for Soroban.
 | `allowance(from, spender)` | Query remaining allowance |
 | `transfer_from(spender, from, to, amount)` | Spend an allowance |
 | `burn(from, amount)` | Destroy tokens |
+| `burn_from(spender, from, amount)` | Destroy tokens using an allowance |
+
+Negative amounts are rejected, balance arithmetic is checked, and
+`transfer_from`/`burn_from` require only the spender's authorization.
 
 ## Usage
 

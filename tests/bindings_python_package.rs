@@ -98,8 +98,7 @@ fn write_package_creates_an_installable_directory_layout() {
         .is_file());
 
     let written_client =
-        std::fs::read_to_string(temp_dir.path().join("sample_contract").join("client.py"))
-            .unwrap();
+        std::fs::read_to_string(temp_dir.path().join("sample_contract").join("client.py")).unwrap();
     assert!(written_client.contains("class ContractClient"));
 }
 

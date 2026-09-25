@@ -202,7 +202,7 @@ impl PluginManager {
         #[cfg(not(feature = "unsafe-native-plugins"))]
         {
             let _ = path_ref;
-            return Err(PluginLoadError::PermissionDenied {
+            Err(PluginLoadError::PermissionDenied {
                 path: path_display,
                 capabilities:
                     "native plugin loading is disabled; enable the unsafe-native-plugins feature"
@@ -341,79 +341,8 @@ impl PluginManager {
                         detail,
                     });
                 }
-            } else if let Some(decl) = ai_decl {
-                let decl = unsafe { &*decl };
-                let mut registrar = AIProxyRegistrar::new();
-
-                let register_result =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        (decl.register)(&mut registrar);
-                    }));
-
-                if let Err(panic_payload) = register_result {
-                    let detail = if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-                        s.clone()
-                    } else {
-                        "Unknown closure panic origin".to_string()
-                    };
-                    return Err(PluginLoadError::RegistrationRuntimePanic {
-                        path: path_display,
-                        detail,
-                    });
-                }
-
                 let plugin_core_version = decl.core_version.to_string();
                 for plugin in registrar.plugins {
-                    let capabilities = plugin.capabilities();
-
-                    // Permission sandbox enforcement
-                    if plugin_trust == TrustLevel::Unknown {
-                        let mut denied = Vec::new();
-                        for cap in &capabilities {
-                            match cap {
-                                AICapability::NetworkAccess
-                                | AICapability::FileSystemAccess
-                                | AICapability::ExecuteCode => {
-                                    denied.push(format!("{:?}", cap));
-                                }
-                                _ => {}
-                            }
-                        }
-                        if !denied.is_empty() {
-                            return Err(PluginLoadError::PermissionDenied {
-                                path: path_display,
-                                capabilities: denied.join(", "),
-                            });
-                        }
-                    }
-
-                let plugin_core_version = decl.core_version.to_string();
-                for plugin in registrar.plugins {
-                    let capabilities = plugin.capabilities();
-
-                    // Permission sandbox enforcement
-                    if plugin_trust == TrustLevel::Unknown {
-                        let mut denied = Vec::new();
-                        for cap in &capabilities {
-                            match cap {
-                                AICapability::NetworkAccess
-                                | AICapability::FileSystemAccess
-                                | AICapability::ExecuteCode => {
-                                    denied.push(format!("{:?}", cap));
-                                }
-                                _ => {}
-                            }
-                        }
-                        if !denied.is_empty() {
-                            return Err(PluginLoadError::PermissionDenied {
-                                path: path_display,
-                                capabilities: denied.join(", "),
-                            });
-                        }
-                    }
-
                     let name = plugin.name().to_string();
                     self.ai_plugins
                         .insert(name, (plugin, plugin_core_version.clone()));

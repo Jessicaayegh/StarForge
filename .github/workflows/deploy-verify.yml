@@ -13,6 +13,9 @@ on:
       - 'src/utils/deploy*.rs'
       - 'src/utils/deployment_verify.rs'
 
+permissions:
+  contents: read
+
 jobs:
   deploy-verify:
     runs-on: ubuntu-latest

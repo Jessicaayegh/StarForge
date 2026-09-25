@@ -35,6 +35,7 @@
 
 # Networks
 
+- [SEP-10 web authentication](SEP10_AUTHENTICATION.md)
 - [Custom network validation](network/custom-network-validation.md)
 - [Horizon reliability](network/horizon-reliability.md)
 - [Network health output](network/network-health.md)

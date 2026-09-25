@@ -45,6 +45,31 @@ Reducing **instruction count** lowers every invocation cost.
 
 The Soroban upload limit is **128 KB**. Every byte costs gas on upload.
 
+### Measuring where the bytes go: `starforge optimize size`
+
+Before optimizing, find out which sections of the module are actually large.
+The `size` command breaks the binary down by WASM section category (code /
+data / custom) and checks the result against configurable budgets
+(see `starforge-size-budget.example.toml`):
+
+```bash norun
+# Soroban 128 KiB total check only
+starforge optimize size --wasm contract.wasm
+
+# Against a project budget file; fails (exit 1) when a budget is exceeded
+starforge optimize size --wasm contract.wasm --budget starforge-size-budget.toml \
+  --fail-on-overage
+
+# Machine-readable breakdown for CI
+starforge optimize size --wasm contract.wasm --budget starforge-size-budget.toml --json
+```
+
+A large **custom** section usually means debug/toolchain metadata (`--strip-debug`,
+`strip = true`); large **data** points at embedded strings; large **code** is
+function bodies best attacked with the Cargo profile below plus `optimize
+transform`. Budget failures print the next suggested commands for the category
+that actually failed.
+
 ### Cargo release profile
 
 ```toml

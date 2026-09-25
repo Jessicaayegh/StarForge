@@ -1,0 +1,38 @@
+# Shared project lockfile for StarForge teams (#805).
+#
+# Copy to `starforge-project.toml` at your repository root and commit it so
+# every team member runs the CLI with the same networks, feature flags, and
+# quality gates. Project values override the per-user config in
+# `~/.starforge/config.toml`; anything not listed here keeps coming from the
+# user's own settings.
+#
+# SECURITY: this file must stay secret-free. The schema structurally cannot
+# carry wallets or wallet key material — sections like `[wallets]` or
+# `[wallet_encryption]` are rejected on load, as are any unknown keys.
+
+# Active network for everyone working in this repository.
+network = "testnet"
+
+# Team-wide telemetry policy.
+telemetry_enabled = false
+
+# Feature-flag defaults (replaces the user's settings wholesale when present).
+[feature_flags]
+metrics_enabled = true
+metrics_retention_days = 30
+
+# AI usage telemetry (replaces the user's settings wholesale when present).
+[ai_telemetry]
+enabled = true
+cloud_aggregation_enabled = false
+
+# Plugin allowlist (replaces the user's settings wholesale when present).
+[plugin_trust]
+trusted_sources = ["plugins.example.com"]
+trusted_publishers = []
+
+# Project networks, merged by name with the user's own networks.
+[networks.project-futurenet]
+horizon_url = "https://horizon-futurenet.stellar.org"
+soroban_rpc_url = "https://soroban-futurenet.stellar.org"
+friendbot_url = "https://friendbot-futurenet.stellar.org"
