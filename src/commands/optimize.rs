@@ -1,4 +1,4 @@
-use crate::utils::{ai_telemetry, config, print as p};
+use crate::utils::{ai_telemetry, config, print as p, wasm_preflight};
 use anyhow::Result;
 use chrono::Utc;
 use clap::{Args, Subcommand};
@@ -18,6 +18,8 @@ pub enum OptimizeCommands {
     Transform(TransformArgs),
     /// Benchmark and compare two WASM binaries
     Bench(BenchArgs),
+    /// Report WASM size broken down by section, checked against budgets
+    Size(SizeArgs),
     /// Show the last optimization report for a contract
     Report(ReportArgs),
     /// List all stored optimization reports
@@ -70,6 +72,26 @@ pub struct BenchArgs {
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Args)]
+pub struct SizeArgs {
+    /// Path to the compiled WASM file
+    #[arg(long)]
+    pub wasm: PathBuf,
+    /// TOML budget file (see starforge-size-budget.example.toml). When
+    /// omitted, only the Soroban 128 KiB total limit is checked.
+    #[arg(long)]
+    pub budget: Option<PathBuf>,
+    /// Inline TOML budget, e.g. --budget-inline 'max_code_bytes = 32768'
+    #[arg(long)]
+    pub budget_inline: Option<String>,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+    /// Fail with exit code 1 when a budget is exceeded
+    #[arg(long, default_value = "false")]
+    pub fail_on_overage: bool,
 }
 
 #[derive(Args)]
@@ -746,6 +768,7 @@ pub async fn handle(cmd: OptimizeCommands) -> Result<()> {
         OptimizeCommands::Analyse(args) => handle_analyse(args),
         OptimizeCommands::Transform(args) => handle_transform(args),
         OptimizeCommands::Bench(args) => handle_bench(args),
+        OptimizeCommands::Size(args) => handle_size(args),
         OptimizeCommands::Report(args) => handle_report(args),
         OptimizeCommands::Reports(args) => handle_reports(args),
     }
@@ -1205,6 +1228,119 @@ fn handle_bench(args: BenchArgs) -> Result<()> {
         p::warn("Optimized binary is larger than baseline — review your changes.");
     }
     p::separator();
+    Ok(())
+}
+
+fn handle_size(args: SizeArgs) -> Result<()> {
+    p::header("WASM Size Breakdown");
+
+    if !args.wasm.exists() {
+        anyhow::bail!(
+            "WASM file not found: {}\nRun `stellar contract build` first.",
+            args.wasm.display()
+        );
+    }
+    if args.budget.is_some() && args.budget_inline.is_some() {
+        anyhow::bail!("Use either --budget or --budget-inline, not both.");
+    }
+
+    let bytes = fs::read(&args.wasm)?;
+    if bytes.len() < 4 || &bytes[..4] != b"\0asm" {
+        anyhow::bail!("Not a valid WASM binary: {}", args.wasm.display());
+    }
+
+    let budget = match (&args.budget, &args.budget_inline) {
+        (Some(path), _) => wasm_preflight::load_budget_file(path)?,
+        (_, Some(inline)) => wasm_preflight::parse_budget_str(inline)?,
+        _ => wasm_preflight::WasmSizeBudget::default(),
+    };
+
+    p::step(1, 2, "Scanning WASM sections…");
+    let breakdown = wasm_preflight::wasm_section_breakdown(&bytes);
+
+    p::step(2, 2, "Checking size budgets…");
+    let mut report = wasm_preflight::check_size_budget(&breakdown, &budget);
+    wasm_preflight::add_budget_suggestions(&args.wasm.to_string_lossy(), &breakdown, &mut report);
+
+    if args.json {
+        let payload = serde_json::json!({
+            "wasm": args.wasm,
+            "breakdown": breakdown,
+            "budget": report,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!();
+        p::kv("Module", &args.wasm.to_string_lossy());
+        p::kv(
+            "Total size",
+            &format!("{:.1} KiB", breakdown.total_bytes as f64 / 1024.0),
+        );
+        println!();
+        println!("  {}", "Section breakdown".white());
+        for section in &breakdown.sections {
+            let label = match &section.custom_name {
+                Some(name) => format!("{} ({})", section.name, name),
+                None => section.name.clone(),
+            };
+            println!("    {:<12} {:>10} bytes", label, section.size_bytes);
+        }
+        println!();
+        println!("  {}", "Category totals".white());
+        for (label, size) in [
+            ("code", breakdown.code_bytes),
+            ("data", breakdown.data_bytes),
+            ("custom", breakdown.custom_bytes),
+            ("other", breakdown.other_bytes),
+        ] {
+            println!("    {:<12} {:>10} bytes", label, size);
+        }
+
+        println!();
+        println!("  {}", "Budgets".white());
+        if report.entries.is_empty() {
+            println!("    {}", "No budgets configured.".dimmed());
+        }
+        for entry in &report.entries {
+            let status = if entry.within_budget {
+                "ok".green().to_string()
+            } else {
+                format!("over by {} bytes", entry.overage_bytes)
+                    .red()
+                    .to_string()
+            };
+            println!(
+                "    {:<12} {:>10} / {:>10} bytes  {}",
+                entry.label, entry.actual_bytes, entry.budget_bytes, status
+            );
+        }
+
+        if report.passed {
+            println!();
+            p::success("All configured size budgets met.");
+        } else if !report.suggestions.is_empty() {
+            println!();
+            println!("  {}", "Next steps".white());
+            for suggestion in &report.suggestions {
+                println!("    {} {}", "→".dimmed(), suggestion);
+            }
+            println!();
+            println!(
+                "  {}",
+                "Full guidance: docs/GAS_OPTIMIZATION_GUIDE.md".dimmed()
+            );
+        }
+        p::separator();
+    }
+
+    if args.fail_on_overage && !report.passed {
+        let over = report.entries.iter().filter(|e| !e.within_budget).count();
+        anyhow::bail!(
+            "{} size budget(s) exceeded. Shrink the module before deploying.",
+            over
+        );
+    }
+
     Ok(())
 }
 

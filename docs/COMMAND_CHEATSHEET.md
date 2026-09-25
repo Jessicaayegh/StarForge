@@ -150,7 +150,7 @@ Global options: `--json`, `--quiet`/`-q`, `--log-format`, `--log-dir`, `--correl
 
 | Subcommand | Description |
 |---|---|
-| `show` | Show current global configuration |
+| `show` | Show effective configuration (user config + project lockfile) |
 | `set <KEY> <VALUE>` | Set a configuration key/value pair |
 | `set-encryption` | Set global wallet encryption parameters (Argon2id) |
 | `doctor` | Validate configuration and check network connectivity |
@@ -188,6 +188,16 @@ Global options: `--json`, `--quiet`/`-q`, `--log-format`, `--log-dir`, `--correl
 | `analyse <WASM>` | Heuristic gas/cpu report |
 | `optimize` | Lightweight WASM shrink pass |
 | `diff <OLD> <NEW>` | Compare estimated costs |
+
+## `optimize` subcommands
+
+| Subcommand | Description |
+|---|---|
+| `analyse <WASM>` | WASM performance issues + score |
+| `size --wasm <FILE>` | Section breakdown + size budgets (--budget, --fail-on-overage) |
+| `transform --src <FILE>` | Apply code transformation hints |
+| `bench` | Benchmark two WASM binaries |
+| `report` | Show the last optimization report |
 
 ## `security` subcommands
 
