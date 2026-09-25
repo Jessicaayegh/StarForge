@@ -149,6 +149,7 @@ pub mod simulation_resources;
 pub mod social;
 pub mod soroban;
 pub mod state_diff;
+pub mod storage_layout;
 pub mod state_transition;
 pub mod stellar_cli_identity;
 pub mod stream;
