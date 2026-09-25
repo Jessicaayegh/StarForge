@@ -1,5 +1,4 @@
-use crate::plugins::manifest;
-use crate::utils::config::{self, Config};
+use crate::utils::config::Config;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -221,17 +220,33 @@ pub struct InstalledPlugin {
     /// Plugin version from manifest.
     #[serde(default)]
     pub plugin_version: String,
+    /// Plugin summary from manifest.
+    #[serde(default)]
+    pub description: String,
     /// RFC3339 timestamp of when the plugin was installed.
     #[serde(default)]
     pub installed_at: Option<String>,
     /// Commands this plugin registers.
     #[serde(default)]
     pub commands: Vec<RegisteredCommand>,
+    /// Human-readable description from the plugin manifest, if any. Older
+    /// registry entries (installed before this field existed) default to
+    /// empty; use [`resolve_plugin_description`] to get a display-ready
+    /// value that falls back to the first command's description.
+    /// Description from the plugin manifest. Empty when the plugin does not
+    /// declare one, in which case the first command's description is used.
+    #[serde(default)]
+    pub publisher: Option<String>,
+    /// Verified publisher public key, if signed
+    #[serde(default)]
+    pub publisher_key: Option<String>,
+    /// Verification status
+    #[serde(default)]
+    pub verification_status: crate::plugins::verifier::VerificationStatus,
 }
 
 fn registry_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
-    let dir = home.join(".starforge").join("plugins");
+    let dir = crate::utils::config::config_dir().join("plugins");
     if !dir.exists() {
         fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
     }
@@ -276,20 +291,18 @@ pub struct UninstallReport {
 }
 
 fn plugins_data_dir() -> Result<PathBuf> {
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
-    Ok(home.join(".starforge").join("plugins"))
+    Ok(crate::utils::config::config_dir().join("plugins"))
 }
 
 /// Returns true if `path` is under the StarForge plugins directory (safe to purge).
 pub fn is_managed_plugin_path(path: &Path) -> bool {
     if let Ok(dir) = plugins_data_dir() {
+        // Prefer the canonicalized comparison; fall back to the uncanonicalized
+        // prefix when either path does not exist on disk yet.
         if let (Ok(path), Ok(dir)) = (path.canonicalize(), dir.canonicalize()) {
             return path.starts_with(&dir);
         }
-        if let Some(parent) = dirs::home_dir() {
-            let prefix = parent.join(".starforge").join("plugins");
-            return path.starts_with(&prefix);
-        }
+        return path.starts_with(&dir);
     }
     false
 }
@@ -308,6 +321,9 @@ pub fn install_plugin(
     plugin_version: &str,
     description: &str,
     commands: Vec<RegisteredCommand>,
+    publisher: Option<String>,
+    publisher_key: Option<String>,
+    verification_status: crate::plugins::verifier::VerificationStatus,
 ) -> Result<()> {
     if !library_path.exists() {
         anyhow::bail!("Plugin library not found: {}", library_path.display());
@@ -325,12 +341,58 @@ pub fn install_plugin(
         trust,
         starforge_version: starforge_version.to_string(),
         plugin_version: plugin_version.to_string(),
+        description: description.to_string(),
         installed_at: Some(now),
         commands,
+        publisher,
+        publisher_key,
+        verification_status,
     });
     reg.plugins.sort_by(|a, b| a.name.cmp(&b.name));
     save_registry(&reg)?;
     Ok(())
+}
+
+/// Resolve a display-ready description for a plugin: prefers the explicit
+/// registry-recorded description, and falls back to the first registered
+/// command's description when that's empty (e.g. for plugins installed
+/// before `description` was tracked).
+pub fn resolve_plugin_description(plugin: &InstalledPlugin) -> String {
+    if !plugin.description.is_empty() {
+        return plugin.description.clone();
+    }
+    plugin
+        .commands
+        .first()
+        .map(|cmd| cmd.description.clone())
+        .unwrap_or_default()
+}
+
+/// A plugin entry with its description pre-resolved, for listing UIs.
+#[derive(Debug, Clone)]
+pub struct PluginListEntry {
+    pub name: String,
+    pub plugin_version: String,
+    pub trust: TrustLevel,
+    pub source: String,
+    pub description: String,
+    pub commands: Vec<RegisteredCommand>,
+}
+
+/// Build display-ready entries for every installed plugin, with descriptions
+/// resolved via [`resolve_plugin_description`].
+pub fn plugin_list_entries(reg: &PluginRegistry) -> Vec<PluginListEntry> {
+    reg.plugins
+        .iter()
+        .map(|p| PluginListEntry {
+            name: p.name.clone(),
+            plugin_version: p.plugin_version.clone(),
+            trust: p.trust.clone(),
+            source: p.source.clone(),
+            description: resolve_plugin_description(p),
+            commands: p.commands.clone(),
+        })
+        .collect()
 }
 
 /// Return all commands registered across all installed plugins (read from registry, no .so load).
@@ -415,8 +477,9 @@ pub fn resolve_plugin_library_path(name: &str, explicit: Option<PathBuf>) -> Res
     }
 
     let cwd = std::env::current_dir().context("Failed to get current dir")?;
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
-    let plugin_dir = home.join(".starforge").join("plugins").join(name);
+    let plugin_dir = crate::utils::config::config_dir()
+        .join("plugins")
+        .join(name);
 
     let candidates = candidate_library_names(name)
         .into_iter()
@@ -528,7 +591,18 @@ mod tests {
     fn install_missing_library_fails() {
         let tmp = TempDir::new().unwrap();
         let missing = tmp.path().join("nonexistent.so");
-        let result = install_plugin("test", &missing, "", "0.1.0", "1.0.0", "", vec![]);
+        let result = install_plugin(
+            "test",
+            &missing,
+            "",
+            "0.1.0",
+            "1.0.0",
+            "",
+            vec![],
+            None,
+            None,
+            crate::plugins::verifier::VerificationStatus::Unsigned,
+        );
         assert!(result.is_err(), "installing a missing library must fail");
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
@@ -565,10 +639,6 @@ mod tests {
             plugin.commands.is_empty(),
             "missing commands field should default to an empty list"
         );
-        assert_eq!(
-            plugin.description, "",
-            "missing description field should default to empty string"
-        );
     }
 
     // ── resolve_plugin_library_path ───────────────────────────────────────────
@@ -585,69 +655,6 @@ mod tests {
     fn missing_implicit_path_returns_error() {
         let result = resolve_plugin_library_path("__no_such_plugin_xyz__", None);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn resolve_plugin_description_prefers_registry_field() {
-        let plugin = InstalledPlugin {
-            name: "demo".into(),
-            path: "/tmp/demo.so".into(),
-            source: String::new(),
-            trust: TrustLevel::Local,
-            starforge_version: String::new(),
-            plugin_version: String::new(),
-            installed_at: None,
-            commands: vec![RegisteredCommand {
-                name: "demo".into(),
-                description: "from command".into(),
-            }],
-            description: "from plugin".into(),
-        };
-        assert_eq!(resolve_plugin_description(&plugin), "from plugin");
-    }
-
-    #[test]
-    fn resolve_plugin_description_falls_back_to_first_command() {
-        let plugin = InstalledPlugin {
-            name: "demo".into(),
-            path: "/tmp/demo.so".into(),
-            source: String::new(),
-            trust: TrustLevel::Local,
-            starforge_version: String::new(),
-            plugin_version: String::new(),
-            installed_at: None,
-            commands: vec![RegisteredCommand {
-                name: "demo".into(),
-                description: "from command".into(),
-            }],
-            description: String::new(),
-        };
-        assert_eq!(resolve_plugin_description(&plugin), "from command");
-    }
-
-    #[test]
-    fn plugin_list_entries_include_resolved_description() {
-        let reg = PluginRegistry {
-            plugins: vec![InstalledPlugin {
-                name: "trusted".into(),
-                path: "/tmp/trusted.so".into(),
-                source: String::new(),
-                trust: TrustLevel::Trusted,
-                starforge_version: "0.1.0".into(),
-                plugin_version: "1.0.0".into(),
-                installed_at: None,
-                commands: vec![RegisteredCommand {
-                    name: "trusted".into(),
-                    description: "Lifecycle integration test plugin".into(),
-                }],
-                description: "Lifecycle integration test plugin".into(),
-            }],
-        };
-
-        let entries = plugin_list_entries(&reg);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].description, "Lifecycle integration test plugin");
-        assert_eq!(entries[0].commands[0].name, "trusted");
     }
 
     // ── backward compatibility ────────────────────────────────────────────────

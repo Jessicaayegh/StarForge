@@ -185,4 +185,27 @@ mod wasm_preflight_tests {
             "violation message should mention the 128 KiB limit"
         );
     }
+
+    #[test]
+    fn unexpected_imports_generate_findings() {
+        let bytes: Vec<u8> = vec![
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+            // import section (id=2, size=15)
+            // 1 import: "bad" "import" func 0
+            0x02, 0x0f, 0x01, 0x03, b'b', b'a', b'd', 0x06, b'i', b'm', b'p', b'o', b'r', b't',
+            0x00, 0x00,
+        ];
+
+        let mut policy = default_policy();
+        policy.allowed_imports = Some(vec!["good".to_string()]);
+
+        let report = validate_wasm_bytes(&bytes, "t.wasm", &policy);
+        assert!(
+            report.is_ok(),
+            "Findings should not cause is_ok to be false"
+        );
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].risk, "Medium");
+        assert!(report.findings[0].message.contains("bad::import"));
+    }
 }

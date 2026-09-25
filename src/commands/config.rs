@@ -1,7 +1,7 @@
 use crate::utils::database;
 use crate::utils::{config, print as p};
 use anyhow::Result;
-use clap::{Args, Subcommand};
+use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum ConfigCommands {
@@ -288,7 +288,10 @@ fn db_check() -> Result<()> {
 }
 
 fn show() -> Result<()> {
-    let cfg = config::load()?;
+    // Show the *effective* config: user config with the project lockfile
+    // applied when one is discovered, so what the user sees is what the CLI
+    // uses in this directory (#805).
+    let cfg = crate::utils::project_config::load_effective()?;
     p::header("StarForge Configuration");
     p::separator();
 
@@ -296,10 +299,21 @@ fn show() -> Result<()> {
         "Config database",
         &database::db_path().display().to_string(),
     );
+    // Surface whether a project lockfile is participating, so an override is
+    // never mistaken for the user's own setting.
+    match crate::utils::project_config::find_and_load_project_lockfile(
+        &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+    ) {
+        Ok(Some((path, _))) => p::kv(
+            "Project lockfile",
+            &format!("{} (project overrides applied)", path.display()),
+        ),
+        _ => p::kv("Project lockfile", "none found"),
+    }
     p::kv("Active network", &cfg.network);
     p::kv(
         "Telemetry",
-        if cfg.telemetry_enabled.unwrap_or(true) {
+        if cfg.telemetry_enabled.unwrap_or(false) {
             "enabled"
         } else {
             "disabled"
@@ -307,7 +321,19 @@ fn show() -> Result<()> {
     );
     p::kv(
         "telemetry.enabled",
-        &cfg.telemetry_enabled.unwrap_or(true).to_string(),
+        &cfg.telemetry_enabled.unwrap_or(false).to_string(),
+    );
+    p::kv(
+        "Privacy mode",
+        if crate::utils::privacy::is_privacy_mode_enabled() {
+            "enabled (strict)"
+        } else {
+            "disabled"
+        },
+    );
+    p::kv(
+        "privacy.mode",
+        &cfg.privacy_mode.unwrap_or(false).to_string(),
     );
 
     println!();
@@ -327,11 +353,17 @@ fn show() -> Result<()> {
     Ok(())
 }
 
+// Not currently called from any code path in this crate. Kept rather than
+// removed since deleting it is a product decision, not a lint-scoping one.
+#[allow(dead_code)]
 fn set_value(key: &str, value: &str) -> Result<()> {
     let mut cfg = config::load()?;
     match key {
         "telemetry" | "telemetry.enabled" => {
             cfg.telemetry_enabled = Some(parse_bool(value)?);
+        }
+        "privacy" | "privacy.mode" => {
+            cfg.privacy_mode = Some(parse_bool(value)?);
         }
         "network" => {
             config::validate_network_exists(&cfg, value)?;
@@ -339,7 +371,7 @@ fn set_value(key: &str, value: &str) -> Result<()> {
         }
         _ => {
             anyhow::bail!(
-                "Unsupported config key '{}'. Supported keys: telemetry.enabled, network",
+                "Unsupported config key '{}'. Supported keys: telemetry.enabled, privacy.mode, network",
                 key
             );
         }
@@ -349,6 +381,9 @@ fn set_value(key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+// Not currently called from any code path in this crate. Kept rather than
+// removed since deleting it is a product decision, not a lint-scoping one.
+#[allow(dead_code)]
 fn parse_bool(value: &str) -> Result<bool> {
     match value.to_ascii_lowercase().as_str() {
         "true" | "1" | "yes" | "on" | "enabled" => Ok(true),
@@ -360,6 +395,9 @@ fn parse_bool(value: &str) -> Result<bool> {
     }
 }
 
+// Not currently called from any code path in this crate. Kept rather than
+// removed since deleting it is a product decision, not a lint-scoping one.
+#[allow(dead_code)]
 fn plugin_trust(cmd: PluginTrustCommands) -> Result<()> {
     match cmd {
         PluginTrustCommands::List => {
@@ -400,6 +438,9 @@ fn plugin_trust(cmd: PluginTrustCommands) -> Result<()> {
     Ok(())
 }
 
+// Not currently called from any code path in this crate. Kept rather than
+// removed since deleting it is a product decision, not a lint-scoping one.
+#[allow(dead_code)]
 fn print_plugin_trust_sources(cfg: &config::Config) {
     p::header("Trusted Plugin Sources");
     if cfg.plugin_trust.trusted_sources.is_empty() {
@@ -466,8 +507,14 @@ fn set(key: &str, value: &str) -> Result<()> {
             p::success(&format!("'{}' set to '{}'.", key, enabled));
             Ok(())
         }
+        "privacy" | "privacy.mode" => {
+            cfg.privacy_mode = Some(enabled);
+            config::save(&cfg)?;
+            p::success(&format!("'{}' set to '{}'.", key, enabled));
+            Ok(())
+        }
         _ => anyhow::bail!(
-            "Unsupported config key '{}'. Supported keys: telemetry.enabled",
+            "Unsupported config key '{}'. Supported keys: telemetry.enabled, privacy.mode",
             key
         ),
     }

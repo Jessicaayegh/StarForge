@@ -51,6 +51,10 @@ pub enum DeploymentAutomateCommands {
         #[arg(long, default_value = "true")]
         monitoring_setup: bool,
 
+        /// Ignore existing checkpoints and start a fresh deployment run
+        #[arg(long, alias = "force")]
+        fresh: bool,
+
         /// Output results as JSON
         #[arg(long)]
         json: bool,
@@ -103,6 +107,7 @@ pub async fn handle(cmd: DeploymentAutomateCommands) -> Result<()> {
             post_deployment_verification,
             rollback_automation,
             monitoring_setup,
+            fresh,
             json,
         } => {
             handle_run(
@@ -115,6 +120,7 @@ pub async fn handle(cmd: DeploymentAutomateCommands) -> Result<()> {
                 post_deployment_verification,
                 rollback_automation,
                 monitoring_setup,
+                fresh,
                 json,
             )
             .await
@@ -138,6 +144,10 @@ pub async fn handle(cmd: DeploymentAutomateCommands) -> Result<()> {
     }
 }
 
+// Each parameter is an independent, named input (CLI flags / distinct config
+// values); bundling them into a struct here would add indirection without
+// reducing real complexity.
+#[allow(clippy::too_many_arguments)]
 async fn handle_run(
     wasm: PathBuf,
     network: String,
@@ -148,6 +158,7 @@ async fn handle_run(
     post_deployment_verification: bool,
     rollback_automation: bool,
     monitoring_setup: bool,
+    fresh: bool,
     json: bool,
 ) -> Result<()> {
     p::header("Deployment Automation Pipeline");
@@ -176,6 +187,7 @@ async fn handle_run(
         enable_rollback_automation: rollback_automation,
         enable_monitoring_setup: monitoring_setup,
         automation_level,
+        fresh,
     };
 
     p::kv("WASM File", &config.wasm_path);
@@ -459,7 +471,7 @@ fn print_automation_result(result: &crate::utils::deployment_automation::Complet
     }
 }
 
-fn handle_history(limit: usize) -> Result<()> {
+fn handle_history(_limit: usize) -> Result<()> {
     p::header("Deployment Automation History");
     p::separator();
 

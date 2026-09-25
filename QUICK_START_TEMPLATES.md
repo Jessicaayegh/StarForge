@@ -205,5 +205,5 @@ These templates are available without initializing the marketplace:
 
 ## Support
 
-- GitHub Issues: https://github.com/YOUR_USERNAME/starforge/issues
-- Documentation: https://github.com/YOUR_USERNAME/starforge
+- GitHub Issues: https://github.com/Nanle-code/StarForge/issues
+- Documentation: https://github.com/Nanle-code/StarForge

@@ -1,0 +1,32 @@
+# StarForge Deterministic Simulation Profiles for Local & CI
+# Issue #724
+
+[profiles.ci-smoke]
+description = "Strict tight resource limits for fast CI sanity checks"
+max_cpu_instructions = 2000000
+max_memory_bytes = 2097152 # 2 MB
+max_read_bytes = 32768     # 32 KB
+max_write_bytes = 8192     # 8 KB
+max_total_entries = 10
+max_fee_stroops = 100000
+default_margin_percent = 20
+
+[profiles.ci-full]
+description = "Standard production-grade ceilings for full CI test pipelines"
+max_cpu_instructions = 100000000
+max_memory_bytes = 41943040 # 40 MB
+max_read_bytes = 200000
+max_write_bytes = 100000
+max_total_entries = 100
+max_fee_stroops = 10000000
+default_margin_percent = 20
+
+[profiles.dev-fast]
+description = "Relaxed developer iteration limits with lower margin for rapid loops"
+max_cpu_instructions = 50000000
+max_memory_bytes = 20971520 # 20 MB
+max_read_bytes = 100000
+max_write_bytes = 50000
+max_total_entries = 50
+max_fee_stroops = 5000000
+default_margin_percent = 10

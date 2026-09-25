@@ -23,13 +23,13 @@ Two input modes. Exactly one is required.
 **Offline** — read a `simulateTransaction` response captured earlier (for
 example by a CI job, or with `curl`):
 
-```bash
+```bash norun
 starforge simulate resources --file simulation.json
 ```
 
 **Live** — simulate against a Soroban RPC endpoint:
 
-```bash
+```bash norun
 starforge simulate resources \
   --contract CCPYZ... \
   --function transfer \
@@ -45,11 +45,22 @@ starforge simulate resources \
 | `--arg <VALUE>` | — | Function argument; repeat for multiple |
 | `--arg-type <TYPE>` | inferred | Type for the matching `--arg`; must be supplied for all or none |
 | `--network <NAME>` | `testnet` | Network for live simulation |
+| `--profile <NAME>` | — | Deterministic simulation profile (`ci-smoke`, `ci-full`, `dev-fast`) to assert resource ceilings |
 | `--margin <PERCENT>` | `20` | Safety margin over the minimum resource fee (`0`–`1000`) |
 | `--inclusion-fee <STROOPS>` | `100` | Per-operation inclusion (base) fee |
 | `--json` | off | Emit the report as machine-readable JSON |
 
-Example output:
+### Deterministic Simulation Profiles
+
+Profiles define reproducible resource ceilings and default margins shared between local development and CI pipelines:
+
+- **`ci-smoke`**: Strict resource limits (2M CPU instructions, 2MB memory, 10 footprint entries, 100k stroops fee). Designed for pull request smoke tests and fast latency budget validation.
+- **`ci-full`**: Standard production-grade limits (100M CPU instructions, 40MB memory, 100 footprint entries, 10M stroops fee).
+- **`dev-fast`**: Relaxed iteration profile (50M CPU instructions, 20MB memory, 10% safety margin) for rapid local development loops.
+
+When `--profile` is specified, StarForge asserts all resource metrics against the profile ceilings and exits non-zero if any metric breaches the ceiling. Profile definitions are version-controlled in `starforge-simulation-profiles.toml`.
+
+Example output with profile assertion:
 
 ```
 Simulated Transaction Resources
@@ -65,6 +76,18 @@ Min resource fee      58,181 stroops (0.0058181 XLM)
 Safety margin (20%)   11,636 stroops
 Inclusion fee         100 stroops
 Recommended fee       69,917 stroops (0.0069917 XLM)
+
+Simulation Profile: ci-smoke
+─────────────────────────────────
+Description           Strict tight resource limits for fast CI sanity checks
+Max CPU               2,000,000
+Max Memory            2,097,152 bytes
+Max Read Bytes        32,768 bytes
+Max Write Bytes       8,192 bytes
+Max Footprint Entries 10
+Max Fee               100,000 stroops
+─────────────────────────────────
+✔ All simulation resource metrics within profile 'ci-smoke' ceilings.
 ```
 
 ### Why the margin exists
@@ -82,7 +105,7 @@ with `txINSUFFICIENT_FEE`. The default 20% matches the Stellar CLI. Set
 Prices a saved simulation and checks it against the budgets configured with
 `starforge cost budget set`:
 
-```bash
+```bash norun
 starforge cost resources --file simulation.json --network mainnet --enforce
 ```
 

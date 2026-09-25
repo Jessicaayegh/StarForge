@@ -27,8 +27,10 @@ inside the JSON parser.
 
 - Must be a JSON object with `version`, `exported_at`, and a non-empty
   `wallets` array.
-- `version` must be exactly `"1"`. A newer version is refused with a message
-  naming both versions rather than being partially read.
+- `version` `"1"` is accepted with a warning (re-export to gain tamper
+  detection). `version` `"2"` is the current format; its HMAC-SHA256 integrity
+  tag is verified on import. Any other version is refused with a message naming
+  both versions rather than being partially read.
 - Wallet names must be unique within the file.
 - Each entry's `public_key` must be a 56-character `G…` StrKey; a
   `secret_key`, when present, must be a 56-character `S…` StrKey or a
@@ -81,6 +83,33 @@ error text lands in terminals, CI logs, and bug reports.
 
 ---
 
+## Backup format versions
+
+| Version | Integrity tag | Accepted | Migration note |
+|---|---|---|---|
+| 1 | None | Yes, with warning | Re-export to get tamper detection |
+| 2 | HMAC-SHA256 | Yes | Tag verified on import; failure means tampering |
+
+The tag is HMAC-SHA256 over the canonical JSON of the backup document (with the
+`integrity_tag` field set to `null`), encoded as lowercase hex. The key is the
+well-known constant `starforge-wallet-backup-v2`; the MAC provides integrity,
+not confidentiality.
+
+## Compatibility
+
+v1 backups written by older CLI versions remain importable. `starforge wallet import`
+accepts them with the warning:
+
+```
+⚠ backup is version 1 (no integrity tag); re-export to get tamper detection
+```
+
+v2 is written by all new exports, including the pre-rotation snapshot created
+by `starforge wallet rotate --backup <file>`. If you have critical backups made
+by a v1 CLI, re-export them now to gain tamper detection.
+
+---
+
 ## Behaviour changes
 
 ### Encrypted bundles with custom Argon2 parameters now import correctly
@@ -120,7 +149,7 @@ exporting.
 
 ## Fuzzing
 
-```bash
+```bash norun
 cargo fuzz run fuzz_wallet_backup_parse       -- -dict=fuzz/dicts/wallet_backup.dict
 cargo fuzz run fuzz_wallet_import_envelope    -- -dict=fuzz/dicts/wallet_backup.dict
 cargo fuzz run fuzz_wallet_backup_structured
@@ -130,7 +159,7 @@ cargo fuzz run fuzz_wallet_backup_structured
 [`tests/wallet_import_property_tests.rs`](../tests/wallet_import_property_tests.rs),
 so every PR checks them without nightly:
 
-```bash
+```bash norun
 cargo test --test wallet_import_property_tests
 PROPTEST_CASES=10000 cargo test --test wallet_import_property_tests
 ```
@@ -145,3 +174,39 @@ corpora, and the invariants each target asserts.
 - [WALLET_ENCRYPTION_FIX.md](../WALLET_ENCRYPTION_FIX.md) — the encryption format itself
 - [SECURITY_LOGGING_GUIDE.md](../SECURITY_LOGGING_GUIDE.md) — what may be logged
 - [docs/COMMAND_REFERENCE.md](COMMAND_REFERENCE.md) — the `wallet` command
+
+---
+
+## Secret material lifetime and zeroization
+
+StarForge uses the [`zeroize`](https://docs.rs/zeroize) crate to overwrite
+sensitive bytes with zeros before they are freed. The following are zeroized
+immediately after use:
+
+| Material | File | Mechanism |
+|---|---|---|
+| Argon2-derived AES key (32 bytes) | `utils/crypto.rs` | `Zeroizing<[u8; 32]>` drops on scope exit |
+| BIP39 seed (64 bytes) | `utils/mnemonic.rs` | `Zeroizing<[u8; 64]>` drops on scope exit |
+| SLIP-0010 intermediate key + chain (2 × 32 bytes per derivation step) | `utils/mnemonic.rs` | `Zeroizing<[u8; 32]>` drops after each child derivation |
+| Raw ed25519 private key bytes | `utils/mnemonic.rs` | `Zeroizing<[u8; 32]>` drops on scope exit |
+| Decrypted Stellar secret key string | `utils/wallet_signer.rs` | `Zeroizing<String>` drops with `SigningRequest` |
+| Passphrase / password from terminal prompt | `utils/crypto.rs` | `Zeroizing<String>` drops when caller is done |
+
+### Compatibility notes
+
+`zeroize` v1.9.0 was already an indirect dependency (pulled in by `argon2`); this
+change makes it direct and enables the derive feature. No migration is needed.
+
+### Security caveats
+
+- **WASM builds**: `zeroize` uses `volatile_write` and a compiler fence on native
+  targets. WebAssembly JIT runtimes do not guarantee that volatile semantics survive
+  compilation; the `starforge-wasm` crate does not handle raw secret material directly,
+  so this is informational rather than a gap.
+- **Heap realloc**: `Zeroizing<String>` zeros the final heap allocation. If the
+  allocator grew the string via realloc, earlier copies of the bytes in freed heap
+  blocks are not covered. For the highest assurance, use a locked-memory allocator.
+- **Swap**: Pages written to swap before the zero pass occur are not retroactively
+  cleared. Use full-disk encryption or an encrypted swap partition on machines
+  handling mainnet keys.
+

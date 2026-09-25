@@ -1,4 +1,5 @@
 use crate::utils::print as p;
+use crate::utils::security::best_practices;
 use crate::utils::security::{
     apply_hardening, default_rules, evaluate_event, format_compliance_report,
     format_data_protection_report, format_report, generate_hardening_report, run_audit,
@@ -10,7 +11,6 @@ use crate::utils::stream::{EventStreamFilters, SorobanEventStream};
 use crate::utils::{config, notifications, soroban};
 use anyhow::Result;
 use clap::{Args, Subcommand};
-use colored::Colorize;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{
@@ -40,6 +40,80 @@ pub enum SecurityCommands {
     Compliance(ComplianceArgs),
     /// AI-powered data protection and encryption checks
     DataProtection(DataProtectionArgs),
+    /// Best-practices analyzer: rule engine, scoring, recommendations, remediation tracking
+    #[command(subcommand)]
+    BestPractices(BestPracticesCommands),
+}
+
+#[derive(Subcommand)]
+pub enum BestPracticesCommands {
+    /// Analyze a contract file or project directory against the best-practices library
+    Analyze(BestPracticesAnalyzeArgs),
+    /// List the rules in the best-practices library
+    Rules {
+        /// Output format: text or json
+        #[arg(long, default_value = "text", value_parser = ["text", "json"])]
+        format: String,
+    },
+    /// Show tracked findings and their remediation status
+    Status {
+        /// Remediation state file
+        #[arg(long, default_value = best_practices::DEFAULT_STATE_FILE)]
+        state: PathBuf,
+        /// Include resolved findings
+        #[arg(long)]
+        all: bool,
+    },
+    /// Accept a finding as known risk (excluded from --fail-on gating)
+    Accept {
+        /// Finding fingerprint (or a unique prefix)
+        fingerprint: String,
+        /// Justification recorded with the decision
+        #[arg(long)]
+        reason: String,
+        /// Remediation state file
+        #[arg(long, default_value = best_practices::DEFAULT_STATE_FILE)]
+        state: PathBuf,
+    },
+    /// Reopen an accepted or resolved finding
+    Reopen {
+        /// Finding fingerprint (or a unique prefix)
+        fingerprint: String,
+        /// Remediation state file
+        #[arg(long, default_value = best_practices::DEFAULT_STATE_FILE)]
+        state: PathBuf,
+    },
+}
+
+#[derive(Args)]
+pub struct BestPracticesAnalyzeArgs {
+    /// Contract source file, Cargo.toml, or project directory
+    #[arg(default_value = ".")]
+    pub path: PathBuf,
+    /// Report format
+    #[arg(long, default_value = "text", value_parser = ["text", "markdown", "json", "sarif"])]
+    pub format: String,
+    /// Write the report to a file instead of stdout
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+    /// Only evaluate rules at or above this severity
+    #[arg(long, value_parser = ["info", "low", "medium", "high", "critical"])]
+    pub min_severity: Option<String>,
+    /// Rule id to skip (repeatable)
+    #[arg(long = "disable", value_name = "RULE_ID")]
+    pub disabled: Vec<String>,
+    /// Exit non-zero when an open finding at or above this severity remains
+    #[arg(long, value_parser = ["info", "low", "medium", "high", "critical"])]
+    pub fail_on: Option<String>,
+    /// Exit non-zero when the security score is below this value (0-100)
+    #[arg(long)]
+    pub min_score: Option<f64>,
+    /// Track findings across runs in the remediation state file
+    #[arg(long)]
+    pub track: bool,
+    /// Remediation state file used with --track
+    #[arg(long, default_value = best_practices::DEFAULT_STATE_FILE)]
+    pub state: PathBuf,
 }
 
 #[derive(Args)]
@@ -232,6 +306,200 @@ pub async fn handle(cmd: SecurityCommands) -> Result<()> {
         SecurityCommands::ThreatDetect(args) => handle_threat_detect(args),
         SecurityCommands::Compliance(args) => handle_compliance(args),
         SecurityCommands::DataProtection(args) => handle_data_protection(args),
+        SecurityCommands::BestPractices(cmd) => handle_best_practices(cmd),
+    }
+}
+
+fn handle_best_practices(cmd: BestPracticesCommands) -> Result<()> {
+    use best_practices::{
+        AnalyzerOptions, BestPracticesAnalyzer, RemediationTracker, ReportFormat, Severity,
+        TrackedStatus,
+    };
+
+    match cmd {
+        BestPracticesCommands::Analyze(args) => {
+            let options = AnalyzerOptions {
+                min_severity: args
+                    .min_severity
+                    .as_deref()
+                    .map(Severity::parse)
+                    .transpose()?,
+                disabled_rules: args.disabled.iter().cloned().collect(),
+            };
+            let fail_on = args.fail_on.as_deref().map(Severity::parse).transpose()?;
+            if let Some(min) = args.min_score {
+                if !(0.0..=100.0).contains(&min) {
+                    anyhow::bail!("--min-score must be between 0 and 100");
+                }
+            }
+
+            let mut report = BestPracticesAnalyzer::new(options).analyze_path(&args.path)?;
+            let tracker = RemediationTracker::new(&args.state);
+            let accepted: std::collections::BTreeSet<String> = if args.track {
+                tracker.track(&mut report)?;
+                tracker
+                    .load()?
+                    .findings
+                    .into_values()
+                    .filter(|f| f.status == TrackedStatus::Accepted)
+                    .map(|f| f.fingerprint)
+                    .collect()
+            } else {
+                Default::default()
+            };
+
+            let rendered = report.render(ReportFormat::parse(&args.format)?)?;
+            match &args.output {
+                Some(path) => {
+                    fs::write(path, &rendered)?;
+                    p::info(&format!("Report written to {}", path.display()));
+                }
+                None => println!("{}", rendered),
+            }
+
+            if let Some(threshold) = fail_on {
+                let blocking = report
+                    .findings
+                    .iter()
+                    .filter(|f| f.severity >= threshold && !accepted.contains(&f.fingerprint))
+                    .count();
+                if blocking > 0 {
+                    anyhow::bail!(
+                        "{} open finding(s) at or above '{}' severity",
+                        blocking,
+                        threshold.label()
+                    );
+                }
+            }
+            if let Some(min) = args.min_score {
+                if report.score.score < min {
+                    anyhow::bail!(
+                        "security score {:.1} is below the required {:.1}",
+                        report.score.score,
+                        min
+                    );
+                }
+            }
+            Ok(())
+        }
+        BestPracticesCommands::Rules { format } => {
+            let rules: Vec<_> = best_practices::rule_library()
+                .iter()
+                .map(|r| r.info())
+                .collect();
+            if format == "json" {
+                println!("{}", serde_json::to_string_pretty(&rules)?);
+                return Ok(());
+            }
+            p::header("Security Best Practices Library");
+            let rows: Vec<Vec<String>> = rules
+                .iter()
+                .map(|r| {
+                    vec![
+                        r.id.clone(),
+                        r.severity.label().to_string(),
+                        r.category.clone(),
+                        r.title.clone(),
+                        r.references.join(", "),
+                    ]
+                })
+                .collect();
+            p::table(
+                &["Rule", "Severity", "Category", "Title", "References"],
+                &rows,
+            );
+            Ok(())
+        }
+        BestPracticesCommands::Status { state, all } => {
+            let tracker = RemediationTracker::new(&state);
+            let loaded = tracker.load()?;
+            if loaded.findings.is_empty() {
+                p::info(
+                    "No tracked findings; run `starforge security best-practices analyze --track`.",
+                );
+                return Ok(());
+            }
+            p::header("Best Practices Remediation");
+            let mut tracked: Vec<_> = loaded
+                .findings
+                .values()
+                .filter(|f| all || f.status != TrackedStatus::Resolved)
+                .collect();
+            tracked.sort_by(|a, b| b.severity.cmp(&a.severity).then(a.file.cmp(&b.file)));
+            let rows: Vec<Vec<String>> = tracked
+                .iter()
+                .map(|f| {
+                    vec![
+                        f.fingerprint.chars().take(8).collect(),
+                        f.status.label().to_string(),
+                        f.severity.label().to_string(),
+                        f.rule_id.clone(),
+                        format!("{}:{}", f.file, f.line),
+                        f.first_seen.chars().take(10).collect(),
+                        f.note.clone().unwrap_or_default(),
+                    ]
+                })
+                .collect();
+            p::table(
+                &[
+                    "Id",
+                    "Status",
+                    "Severity",
+                    "Rule",
+                    "Location",
+                    "First seen",
+                    "Note",
+                ],
+                &rows,
+            );
+            if let Some(last) = loaded.score_history.last() {
+                p::kv(
+                    "Latest score",
+                    &format!("{:.1} ({}), {} open", last.score, last.grade, last.open),
+                );
+            }
+            if loaded.score_history.len() > 1 {
+                let first = &loaded.score_history[0];
+                p::kv(
+                    "Trend",
+                    &format!(
+                        "{:.1} -> {:.1} over {} run(s)",
+                        first.score,
+                        loaded.score_history[loaded.score_history.len() - 1].score,
+                        loaded.score_history.len()
+                    ),
+                );
+            }
+            Ok(())
+        }
+        BestPracticesCommands::Accept {
+            fingerprint,
+            reason,
+            state,
+        } => {
+            let updated = RemediationTracker::new(&state).set_status(
+                &fingerprint,
+                TrackedStatus::Accepted,
+                Some(reason),
+            )?;
+            p::success(&format!(
+                "Accepted {} ({}) at {}:{}",
+                updated.rule_id, updated.title, updated.file, updated.line
+            ));
+            Ok(())
+        }
+        BestPracticesCommands::Reopen { fingerprint, state } => {
+            let updated = RemediationTracker::new(&state).set_status(
+                &fingerprint,
+                TrackedStatus::Open,
+                None,
+            )?;
+            p::success(&format!(
+                "Reopened {} at {}:{}",
+                updated.rule_id, updated.file, updated.line
+            ));
+            Ok(())
+        }
     }
 }
 
@@ -692,12 +960,9 @@ fn handle_threat_detect(args: ThreatDetectArgs) -> Result<()> {
     p::kv("Malicious", &summary.malicious.to_string());
     p::kv("Suspicious", &summary.suspicious.to_string());
 
-    match args.format.as_str() {
-        "json" => {
-            let json = serde_json::to_string_pretty(&event)?;
-            println!("{}", json);
-        }
-        _ => {}
+    if args.format.as_str() == "json" {
+        let json = serde_json::to_string_pretty(&event)?;
+        println!("{}", json);
     }
 
     if event.classification == crate::utils::security::ThreatClassification::Malicious {

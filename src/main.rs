@@ -1,5 +1,3 @@
-#![allow(dead_code, unused, clippy::all)]
-
 pub use starforge::commands;
 pub mod curation;
 pub use starforge::plugins;
@@ -29,6 +27,14 @@ struct Cli {
     #[arg(long, short = 'q', global = true)]
     quiet: bool,
 
+    /// Disable color and decorative Unicode symbols (✓/✗/⚠/→) in favor of
+    /// ASCII labels ([OK]/[ERROR]/[WARN]/[INFO]), for screen readers,
+    /// braille displays, and log files. Auto-detected from $NO_COLOR
+    /// (https://no-color.org) or $STARFORGE_NO_COLOR when this flag is
+    /// absent.
+    #[arg(long, global = true)]
+    plain: bool,
+
     /// Log output format: human (default) or json
     #[arg(long, global = true, default_value = "human", value_parser = ["human", "json"])]
     log_format: String,
@@ -42,6 +48,18 @@ struct Cli {
     /// Must be 8–64 characters of [A-Za-z0-9_-].
     #[arg(long, global = true)]
     correlation_id: Option<String>,
+
+    /// Never block on an interactive prompt: fail with a clear error
+    /// instead, pointing to the env var or flag that supplies the value
+    /// headlessly. Auto-detected when $CI is set or stdin isn't a terminal
+    /// (also settable via $STARFORGE_NON_INTERACTIVE).
+    #[arg(long, global = true)]
+    non_interactive: bool,
+
+    /// Allow signing when the configured passphrase differs from the connected endpoint.
+    /// This is unsafe and should only be used with a deliberately trusted endpoint.
+    #[arg(long, global = true)]
+    allow_network_passphrase_mismatch: bool,
 }
 
 #[derive(Subcommand)]
@@ -61,6 +79,22 @@ enum Commands {
     /// Local LLM assistant for Soroban contracts (audit, explain, test, optimise, profile)
     #[command(subcommand)]
     Ai(commands::ai::AiCommands),
+
+    /// AI-driven performance profiling commands
+    #[command(subcommand, name = "ai-profile")]
+    AiProfile(commands::ai_profile::AiProfileCommands),
+
+    /// AI-powered IDE integration commands
+    #[command(subcommand, name = "ai-ide")]
+    AiIde(commands::ai_ide::AiIdeCommands),
+
+    /// AI-driven test maintenance commands
+    #[command(subcommand, name = "ai-test-maintain")]
+    AiTestMaintain(commands::ai_test_maintain::AiTestMaintainCommands),
+
+    /// AI-driven deployment testing commands
+    #[command(subcommand, name = "ai-deployment-test")]
+    AiDeploymentTest(commands::ai_deployment_test::AiDeploymentTestCommands),
 
     /// Manage test wallets (create, list, fund, show, remove)
     #[command(subcommand)]
@@ -95,6 +129,9 @@ enum Commands {
     /// Deployment history, rollback, verification, and dashboard
     #[command(subcommand)]
     Deployments(commands::deployments::DeploymentsCommands),
+    /// Manage deployment environments (dev/staging/production): configuration, promotion, isolation, and a dashboard
+    #[command(subcommand)]
+    Environment(commands::environment::EnvironmentCommands),
     /// Show starforge config and environment info
     Info,
     /// Manage AI prompt templates and versioning
@@ -113,13 +150,17 @@ enum Commands {
 
     Tx(commands::tx::TxArgs), // fetch transaction for the account
 
+    /// SEP-10 web authentication (anchor auth testing)
+    #[command(subcommand)]
+    Sep10(commands::sep10::Sep10Commands),
+
     /// View or switch the active network (testnet/mainnet)
     #[command(subcommand)]
     Network(commands::network::NetworkCommands),
     /// Local Soroban devnet (Docker quickstart)
     #[command(subcommand)]
     Node(commands::node::NodeCommands),
-    /// Generate shell completions for bash, zsh, and fish
+    /// Generate shell completions for bash, zsh, fish, and powershell
     #[command(subcommand)]
     Completions(commands::completions::CompletionShell),
 
@@ -175,6 +216,14 @@ enum Commands {
     /// Manage third-party plugins
     #[command(subcommand)]
     Plugin(commands::plugin::PluginCommands),
+
+    /// Check PR readiness (CI status and merge conflicts)
+    #[command(subcommand)]
+    Pr(commands::pr::PrCommands),
+
+    /// AI mutation testing for Soroban contracts
+    #[command(subcommand)]
+    Mutate(commands::mutate::MutateCommands),
     /// Privacy protection, anonymization, consent, and reporting
     #[command(subcommand)]
     Privacy(commands::privacy::PrivacyCommands),
@@ -274,8 +323,15 @@ enum Commands {
     /// Static analysis and linting for Soroban contracts
     Lint(commands::lint::LintArgs),
 
+    /// Generate or install man pages
+    #[command(subcommand)]
+    Man(commands::man::ManCommand),
+
     /// Run connectivity diagnostics for attached Ledger/Trezor devices
     Diagnostics(commands::diagnostics::DiagnosticsArgs),
+
+    /// Collect environment diagnostics and generate a prefilled bug report
+    BugReport(commands::bug_report::BugReportArgs),
 
     /// Template version control (versioning, branching, changelog)
     #[command(subcommand)]
@@ -336,11 +392,51 @@ enum Commands {
 
 static OUTPUT_MODE_INIT: Once = Once::new();
 
+/// Stack reserved for the thread that actually runs the CLI.
+///
+/// Windows gives the process main thread a 1 MiB stack by default, where Linux
+/// and macOS give 8 MiB. Building this crate's clap command tree needs more
+/// than 1 MiB in a debug build, so on Windows *every* invocation -- including
+/// `--version` -- died in `Cli::parse()` with STATUS_STACK_OVERFLOW
+/// (0xC00000FD) before reaching any command. Measured floor is between 1 and
+/// 2 MiB; 8 MiB matches the Unix default and leaves room for the tree to grow.
+const MAIN_STACK_SIZE: usize = 8 * 1024 * 1024;
+
+/// Exit code Rust uses when the main thread panics.
+const PANIC_EXIT_CODE: i32 = 101;
+
+fn main() {
+    // Run on an explicitly sized thread rather than the process main thread so
+    // the stack does not depend on the platform default. rustc does the same
+    // thing for the same reason.
+    let worker = std::thread::Builder::new()
+        .name("starforge-main".to_string())
+        .stack_size(MAIN_STACK_SIZE)
+        .spawn(run)
+        .expect("failed to spawn the starforge main thread");
+
+    if worker.join().is_err() {
+        // The panic hook has already reported the payload; mirror the exit code
+        // the runtime would have produced had this panicked on the main thread.
+        std::process::exit(PANIC_EXIT_CODE);
+    }
+}
+
 #[tokio::main]
-async fn main() {
+async fn run() {
     let cli = Cli::parse();
     OUTPUT_MODE_INIT.call_once(|| {});
     utils::output::set_json_mode(cli.json);
+    utils::output::set_plain_mode(cli.plain);
+    if utils::output::is_plain_mode_enabled() {
+        // Global override: neutralizes every `colored` call in the codebase,
+        // not only the ones in utils::print that also swap their Unicode
+        // symbols for ASCII labels, so plain mode is not a partial effort
+        // that still leaves ANSI escapes in less-visited output paths.
+        colored::control::set_override(false);
+    }
+    utils::interactive::set_non_interactive(cli.non_interactive);
+    utils::network_guard::set_allow_mismatch(cli.allow_network_passphrase_mismatch);
 
     // Initialise structured logging before anything else runs.
     let log_cfg =
@@ -357,12 +453,13 @@ async fn main() {
         Ok(id) => id,
         Err(e) => {
             eprintln!("Invalid correlation ID: {}", e);
-            std::process::exit(2);
+            utils::exit_codes::ExitCode::Usage.exit();
         }
     };
     utils::correlation::init(correlation_id);
 
-    if !cli.quiet {
+    // Completion scripts are sourced by the shell, so stdout must be pure script.
+    if !cli.quiet && !matches!(cli.command, Commands::Completions(_)) {
         print_banner();
     }
 
@@ -371,6 +468,10 @@ async fn main() {
         Commands::AiNavigate(_) => "ai-navigate",
         Commands::AiQualityGate(_) => "ai-quality-gate",
         Commands::Ai(_) => "ai",
+        Commands::AiProfile(_) => "ai-profile",
+        Commands::AiIde(_) => "ai-ide",
+        Commands::AiTestMaintain(_) => "ai-test-maintain",
+        Commands::AiDeploymentTest(_) => "ai-deployment-test",
         Commands::Wallet(_) => "wallet",
         Commands::Nl(_) => "nl",
         Commands::New(_) => "new",
@@ -382,12 +483,15 @@ async fn main() {
         Commands::Inspect(_) => "inspect",
         Commands::Deploy(_) => "deploy",
         Commands::Deployments(_) => "deployments",
+        Commands::Environment(_) => "environment",
         Commands::Info => "info",
+        Commands::BugReport(_) => "bug-report",
         Commands::Prompts(_) => "prompts",
         Commands::Explain(_) => "explain",
         Commands::Config(_) => "config",
         Commands::Telemetry(_) => "telemetry",
         Commands::Tx(_) => "tx",
+        Commands::Sep10(_) => "sep10",
         Commands::Network(_) => "network",
         Commands::Node(_) => "node",
         Commands::Completions(_) => "completions",
@@ -401,6 +505,8 @@ async fn main() {
         Commands::Gas(_) => "gas",
         Commands::Cost(_) => "cost",
         Commands::Plugin(_) => "plugin",
+        Commands::Pr(_) => "pr",
+        Commands::Mutate(_) => "mutate",
         Commands::Privacy(_) => "privacy",
         Commands::Project(_) => "project",
         Commands::Template(_) => "template",
@@ -426,7 +532,9 @@ async fn main() {
         Commands::Simulate(_) => "simulate",
         Commands::Backup(_) => "backup",
         Commands::Lint(_) => "lint",
+        Commands::Man(_) => "man",
         Commands::Diagnostics(_) => "diagnostics",
+        Commands::BugReport(_) => "bug-report",
         Commands::TemplateVcs(_) => "template-vcs",
         Commands::Perf(_) => "perf",
         Commands::AdvancedPerf(_) => "advanced-perf",
@@ -461,6 +569,10 @@ async fn main() {
         Commands::AiNavigate(cmd) => commands::ai_navigate::handle(cmd),
         Commands::AiQualityGate(cmd) => commands::ai_quality_gate::handle(cmd),
         Commands::Ai(cmd) => commands::ai::handle(cmd).await,
+        Commands::AiProfile(cmd) => commands::ai_profile::handle(cmd).await,
+        Commands::AiIde(cmd) => commands::ai_ide::handle(cmd).await,
+        Commands::AiTestMaintain(cmd) => commands::ai_test_maintain::handle(cmd).await,
+        Commands::AiDeploymentTest(cmd) => commands::ai_deployment_test::handle(cmd).await,
         Commands::Wallet(cmd) => commands::wallet::handle(cmd).await,
         Commands::Nl(args) => commands::nl::handle(args).await,
         Commands::New(cmd) => commands::new::handle(cmd).await,
@@ -470,12 +582,15 @@ async fn main() {
         Commands::Debug(cmd) => commands::debug::handle(cmd).await,
         Commands::Deploy(args) => commands::deploy::handle(args).await,
         Commands::Deployments(cmd) => commands::deployments::handle(cmd).await,
+        Commands::Environment(cmd) => commands::environment::handle(cmd),
         Commands::Info => commands::info::handle().await,
+        Commands::BugReport(args) => commands::bug_report::handle(args).await,
         Commands::Prompts(cmd) => commands::prompts::handle(&cmd).await,
         Commands::Explain(ref cmd) => commands::explain::handle(cmd).await,
         Commands::Config(cmd) => commands::config::handle(cmd).await,
         Commands::Telemetry(cmd) => commands::telemetry::handle(cmd).await,
         Commands::Tx(args) => commands::tx::handle(args).await,
+        Commands::Sep10(cmd) => commands::sep10::handle(cmd).await,
         Commands::Network(cmd) => commands::network::handle(cmd).await,
         Commands::Node(cmd) => commands::node::handle(cmd).await,
         Commands::Completions(shell) => commands::completions::handle(shell).await,
@@ -503,6 +618,8 @@ async fn main() {
         Commands::Test(args) => commands::test::handle(args).await,
         Commands::Gas(args) => commands::gas::handle(args).await,
         Commands::Plugin(args) => commands::plugin::handle(args).await,
+        Commands::Pr(cmd) => commands::pr::handle(cmd).await,
+        Commands::Mutate(cmd) => commands::mutate::handle(cmd).await,
         Commands::Privacy(cmd) => commands::privacy::handle(cmd).await,
         Commands::Template(args) => commands::template::handle(args).await,
         Commands::Registry(cmd) => commands::registry::handle(cmd).await,
@@ -527,6 +644,7 @@ async fn main() {
         Commands::Simulate(cmd) => commands::simulate::handle(cmd).await,
         Commands::Backup(cmd) => commands::backup::handle(cmd).await,
         Commands::Lint(args) => commands::lint::handle(args).await,
+        Commands::Man(cmd) => commands::man::handle(cmd).await,
         Commands::Diagnostics(args) => commands::diagnostics::handle(args),
         Commands::TemplateVcs(cmd) => commands::template_vcs::handle(cmd).await,
         Commands::Perf(cmd) => commands::perf::handle(cmd).await,
@@ -567,13 +685,19 @@ async fn main() {
     );
 
     if let Err(e) = result {
+        if utils::output::is_json_mode_enabled() {
+            let _ = utils::output::print_error_json("command_error", &e.to_string());
+            std::process::exit(1);
+        }
+
         let mut hints = recovery_hints(&command_name, &e);
         // Augment the static command-specific hints with the AI Contextual
         // Help engine. Patterns that did not match the static rule table
         // still produce a useful, command-agnostic one-liner.
         utils::context_help::troubleshoot_merging(&e.to_string(), &mut hints);
         utils::print::cli_error(&e, &hints.iter().map(String::as_str).collect::<Vec<_>>());
-        std::process::exit(1);
+        let code = utils::exit_codes::determine_exit_code(&e);
+        code.exit();
     }
 
     // On a successful run, optionally surface a single proactive tip.
@@ -584,19 +708,21 @@ async fn main() {
     // Truthy semantics: only the listed false-strings opt out. Any other
     // value ("1", "yes", " true", "", unset) keeps tips enabled; tighten
     // with care so we never regress "1" → disable.
-    let tips_allowed = std::env::var("STARFORGE_HELP_TIPS")
-        .map(|v| !matches!(v.to_lowercase().as_str(), "0" | "false" | "off" | "no"))
-        .unwrap_or(true);
+    let tips_allowed = !cli.quiet
+        && !utils::output::is_json_mode_enabled()
+        && std::env::var("STARFORGE_HELP_TIPS")
+            .map(|v| !matches!(v.to_lowercase().as_str(), "0" | "false" | "off" | "no"))
+            .unwrap_or(true);
     if tips_allowed {
         let cfg = utils::config::load().ok();
-        let tips_enabled = cfg.and_then(|c| c.telemetry_enabled).unwrap_or(true);
+        let tips_enabled = cfg.and_then(|c| c.telemetry_enabled).unwrap_or(false);
         if tips_enabled {
             let history_path = utils::config::config_dir();
             if let Ok(history_entries) = utils::history::load_history(&history_path) {
                 if let Some(tip) =
                     utils::context_help::proactive_tip(&command_name, &history_entries)
                 {
-                    utils::print::info(&tip);
+                    eprintln!("{}", tip);
                 }
             }
         }
@@ -742,7 +868,7 @@ fn recovery_hints(command: &str, err: &anyhow::Error) -> Vec<String> {
                     .into(),
             );
             hints.push("Explain a specific category: starforge ai-debug explain auth".into());
-            hints.push("Available categories: auth, arithmetic, storage, token, panic, wasm, network, ttl, test, type".into());
+            hints.push("Available categories: auth, arithmetic, storage, token, panic, wasm, network, deployment, rollback, security, analytics, ttl, test, type".into());
         }
         "ai-test" => {
             if msg.contains("not found") || msg.contains("no such file") {
@@ -777,11 +903,9 @@ fn recovery_hints(command: &str, err: &anyhow::Error) -> Vec<String> {
             hints.push("Analyze a contract: starforge ai-recommend analyze src/lib.rs".into());
             hints.push("Scan a project: starforge ai-recommend scan .".into());
         }
-        "benchmark" | "test" => {
-            if msg.contains("wasm") || msg.contains("not found") {
-                hints.push("Build your contract first: stellar contract build".into());
-                hints.push("Pass the correct --wasm path to the command.".into());
-            }
+        "benchmark" | "test" if (msg.contains("wasm") || msg.contains("not found")) => {
+            hints.push("Build your contract first: stellar contract build".into());
+            hints.push("Pass the correct --wasm path to the command.".into());
         }
 
         _ => {}
@@ -814,7 +938,7 @@ fn handle_external_plugin(args: Vec<String>) -> anyhow::Result<()> {
     let plugin_name = &args[0];
     let plugin_args = &args[1..];
 
-    let cfg = starforge::utils::config::load()?;
+    let _cfg = starforge::utils::config::load()?;
     let reg = plugins::registry::load_registry().unwrap_or_default();
     if reg.plugins.is_empty() {
         anyhow::bail!(

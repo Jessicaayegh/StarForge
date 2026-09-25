@@ -52,6 +52,51 @@ horizon_url = "https://horizon-staging.example.com"
 soroban_rpc_url = "https://rpc-staging.example.com"
 ```
 
+### Project lockfiles for teams (#805)
+
+For settings a whole team should share, StarForge supports a committed,
+**non-secret** project lockfile named `starforge-project.toml` (see
+`starforge-project.example.toml` at the repository root). Place it anywhere in
+your repository — any `starforge` command run inside the repository tree picks
+it up by walking upwards to the repository root.
+
+```toml
+# starforge-project.toml — commit this
+network = "testnet"
+telemetry_enabled = false
+
+[networks.project-futurenet]
+horizon_url = "https://horizon-futurenet.stellar.org"
+soroban_rpc_url = "https://soroban-futurenet.stellar.org"
+```
+
+Team workflow:
+
+1. Commit `starforge-project.toml` with the networks, feature flags, AI
+   telemetry, and plugin-trust settings your team agrees on.
+2. Each member keeps personal settings (wallets, encryption) in their own
+   `~/.starforge` config as usual.
+3. Commands resolve the **effective** config = user config with project
+   overrides applied — project wins over user, so committed team settings
+   beat personal defaults.
+
+Security model:
+
+- The lockfile schema has **no secret-bearing fields**: there is no way to
+  express wallets or wallet key material, and `deny_unknown_fields` rejects
+  sections like `[wallets]` or `[wallet_encryption]` at load time instead of
+  silently ignoring them.
+- A broken or typo'd lockfile (`feautre_flags = ...`) is a hard load error,
+  never a silent no-op.
+- Per-install identity (`version`, `install_id`) always stays with the user
+  config; the project layer cannot forge it.
+- `starforge config show` tells you which lockfile (if any) is participating,
+  so an override is never mistaken for a personal setting.
+
+Commands that only read configuration use the effective config. Commands
+that write configuration still operate on the user config only — project
+overrides are an input, never something persisted back.
+
 ### Precedence
 
 | Field | Rule |
@@ -88,7 +133,7 @@ Guaranteed, and tested over generated inputs:
 
 `ConfigOverlay` uses `deny_unknown_fields`. A typo is a hard error:
 
-```
+```bash norun
 $ starforge ... # with `netwrok = "mainnet"` in the overlay
 Failed to parse configuration overlay TOML: unknown field `netwrok`
 ```
@@ -152,6 +197,47 @@ the duplicate silently shadowed the other on lookup.
   cannot swap out a deployer key.
 - An overlay cannot set `install_id`, which is used for deterministic
   feature-flag bucketing.
+
+---
+
+## Atomic writes
+
+Every config-directory file StarForge writes by itself — migration backups
+(`config.backup.v*.toml`), a restored `config.toml`, and `save_config_file`
+exports — goes through `config::atomic_write`:
+
+1. Bytes are written to a uniquely named temporary file **in the same
+   directory** as the destination (`.starforge-<pid>-<nanos>-<n>.tmp`), never
+   to a temp dir on another filesystem.
+2. The temporary file is flushed and **fsynced**.
+3. The temporary file is **renamed over the destination**, which is atomic on
+   the same filesystem: a reader (or a crashed process) sees either the old
+   complete file or the new complete file, never a truncated one.
+4. On Unix the parent directory is fsynced afterwards so the rename itself is
+   durable. On any error the temporary file is removed, so no stray `.tmp`
+   files accumulate.
+
+### Compatibility and platform notes
+
+- **Windows** has no safe, portable way to fsync a directory handle, so the
+  directory fsync is skipped there; the per-file fsync still guarantees no torn
+  contents can be observed. `std::fs::rename` normally replaces an existing
+  destination on Windows (`MOVEFILE_REPLACE_EXISTING`); for a locked or
+  read-only destination StarForge falls back to remove-then-rename rather than
+  failing the save.
+- The TOML config file is a **legacy/export format**. The primary persistence
+  path is the SQLite store (`save()`); only `save_config_file`, migration
+  backups, and `rollback_config` write `config.toml` itself.
+- `atomic_write` creates missing parent directories and fails cleanly when a
+  path's parent is actually a file, leaving the previous file untouched.
+
+### Migration/behavioral changes
+
+- `rollback_config` previously restored backups with a non-atomic `fs::copy`.
+  It now reads the backup and writes it through `atomic_write`, so an
+  interrupted rollback can no longer leave a half-written `config.toml`.
+- `write_config_backup` previously wrote backups with a non-atomic `fs::write`.
+  It now uses `atomic_write`. Existing backup files remain valid and unchanged.
 
 ---
 

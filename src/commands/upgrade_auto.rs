@@ -19,6 +19,8 @@ use stellar_xdr::curr::{
 pub enum UpgradeAutoCommands {
     /// Check compatibility between two WASM versions
     Compat(CompatArgs),
+    /// Diff two contract interfaces (ABI + auth surface) and classify breaking vs non-breaking changes
+    Diff(DiffArgs),
     /// Generate an automated upgrade workflow plan
     Plan(PlanArgs),
     /// Apply an upgrade workflow plan (runs compatibility check, migration, upgrade)
@@ -51,6 +53,25 @@ pub struct CompatArgs {
     /// Fail with exit code 1 if incompatible
     #[arg(long, default_value = "true")]
     pub fail_on_incompatible: bool,
+}
+
+#[derive(Args)]
+pub struct DiffArgs {
+    /// Path to the old (currently deployed) WASM interface
+    #[arg(long)]
+    pub old_wasm: PathBuf,
+    /// Path to the new WASM interface
+    #[arg(long)]
+    pub new_wasm: PathBuf,
+    /// Output format for the report: json or markdown
+    #[arg(long, default_value = "json", value_parser = ["json", "markdown"])]
+    pub format: String,
+    /// Optional file path to write the report to (in addition to stdout)
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+    /// Acknowledge breaking changes and exit 0
+    #[arg(long)]
+    pub acknowledge: bool,
 }
 
 #[derive(Args)]
@@ -208,6 +229,202 @@ pub struct ChangedSignature {
     pub name: String,
     pub before: String,
     pub after: String,
+}
+
+/// Report produced by the contract interface diff tool (`upgrade auto diff`).
+///
+/// Unlike the broader [`CompatCheck`], this is narrowly scoped to the *public
+/// contract interface*: exported ABI functions, public types, and the auth
+/// surface. It classifies every change as either breaking or non-breaking and
+/// can be rendered as JSON or Markdown for governance proposals.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InterfaceDiffReport {
+    pub old_hash: String,
+    pub new_hash: String,
+    /// True when the new interface contains at least one breaking change.
+    pub breaking: bool,
+    pub old_function_count: usize,
+    pub new_function_count: usize,
+    pub removed_functions: Vec<String>,
+    pub changed_functions: Vec<ChangedSignature>,
+    pub added_functions: Vec<String>,
+    pub removed_types: Vec<String>,
+    pub changed_types: Vec<ChangedSignature>,
+    pub added_types: Vec<String>,
+    /// True when the auth surface (`require_auth`) differs between builds.
+    pub auth_surface_changed: bool,
+    pub breaking_issues: Vec<String>,
+    pub non_breaking_issues: Vec<String>,
+    pub timestamp: String,
+}
+
+impl InterfaceDiffReport {
+    /// List of human-readable breaking-change descriptions, suitable for a
+    /// governance proposal or a rollback gate.
+    pub fn breaking_summary(&self) -> Vec<String> {
+        self.breaking_issues.clone()
+    }
+}
+
+/// Detect whether the WASM binary embeds the `require_auth` host-call symbol.
+///
+/// This is a conservative byte-pattern probe (matching the heuristic already
+/// used by [`analyse_compat`]) — a false negative is treated as "auth absent".
+fn wasm_has_auth_surface(bytes: &[u8]) -> bool {
+    bytes.windows(12).any(|w| *w == b"require_auth"[..])
+}
+
+/// Diff two contract *interfaces* (ABI metadata + auth surface) and classify
+/// breaking vs non-breaking changes. Pure function: no I/O, no config.
+pub fn analyse_interface(old_bytes: &[u8], new_bytes: &[u8]) -> InterfaceDiffReport {
+    let old_hash = wasm_hash_hex(old_bytes);
+    let new_hash = wasm_hash_hex(new_bytes);
+
+    let mut breaking_issues = Vec::new();
+    let mut non_breaking_issues = Vec::new();
+
+    let old_spec = decode_spec_model(old_bytes);
+    let new_spec = decode_spec_model(new_bytes);
+
+    let mut abi = AbiCompatibilityReport::default();
+    if let (Ok(old_model), Ok(new_model)) = (&old_spec, &new_spec) {
+        abi = compare_abi(old_model, new_model);
+    } else {
+        match old_spec {
+            Err(e) => non_breaking_issues.push(format!(
+                "Could not decode old contract ABI metadata (assumed empty): {e}"
+            )),
+            _ => {}
+        }
+        match new_spec {
+            Err(e) => non_breaking_issues.push(format!(
+                "Could not decode new contract ABI metadata (assumed empty): {e}"
+            )),
+            _ => {}
+        }
+    }
+
+    for function in &abi.removed_functions {
+        breaking_issues.push(format!("Removed ABI function: `{function}`"));
+    }
+    for function in &abi.changed_functions {
+        breaking_issues.push(format!(
+            "Changed ABI function `{}`: `{}` -> `{}`",
+            function.name, function.before, function.after
+        ));
+    }
+    for type_name in &abi.removed_types {
+        breaking_issues.push(format!("Removed public type: `{type_name}`"));
+    }
+    for changed in &abi.changed_types {
+        breaking_issues.push(format!(
+            "Changed public type `{}`: `{}` -> `{}`",
+            changed.name, changed.before, changed.after
+        ));
+    }
+    for function in &abi.added_functions {
+        non_breaking_issues.push(format!("Added ABI function: `{function}`"));
+    }
+    for added in &abi.added_types {
+        non_breaking_issues.push(format!("Added public type: `{added}`"));
+    }
+
+    let old_auth = wasm_has_auth_surface(old_bytes);
+    let new_auth = wasm_has_auth_surface(new_bytes);
+    let auth_surface_changed = old_auth != new_auth;
+    if auth_surface_changed {
+        breaking_issues.push(if old_auth {
+            "Authorization (require_auth) guards were removed from the new interface".to_string()
+        } else {
+            "Authorization (require_auth) guards were added in the new interface".to_string()
+        });
+    }
+
+    if old_hash == new_hash {
+        non_breaking_issues
+            .push("Old and new WASM are byte-identical; no interface change".to_string());
+    }
+
+    let breaking = !breaking_issues.is_empty();
+
+    InterfaceDiffReport {
+        old_hash,
+        new_hash,
+        breaking,
+        old_function_count: abi.old_function_count,
+        new_function_count: abi.new_function_count,
+        removed_functions: abi.removed_functions,
+        changed_functions: abi.changed_functions,
+        added_functions: abi.added_functions,
+        removed_types: abi.removed_types,
+        changed_types: abi.changed_types,
+        added_types: abi.added_types,
+        auth_surface_changed,
+        breaking_issues,
+        non_breaking_issues,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    }
+}
+
+/// Render an [`InterfaceDiffReport`] as Markdown for a governance proposal.
+pub fn render_interface_diff_markdown(report: &InterfaceDiffReport) -> String {
+    let verdict = if report.breaking {
+        "BREAKING"
+    } else {
+        "COMPATIBLE"
+    };
+
+    let mut md = String::new();
+    md.push_str(&format!(
+        "# Contract Interface Diff Report\n\n**Verdict:** `{verdict}`\n\n"
+    ));
+    md.push_str(&format!(
+        "- **Old WASM hash:** `{}`\n- **New WASM hash:** `{}`\n\n",
+        report.old_hash, report.new_hash
+    ));
+    md.push_str(&format!(
+        "- **Interface size:** {} -> {} functions\n\n",
+        report.old_function_count, report.new_function_count
+    ));
+
+    md.push_str("## Breaking changes\n\n");
+    if report.breaking_issues.is_empty() {
+        md.push_str("_None._\n\n");
+    } else {
+        for issue in &report.breaking_issues {
+            md.push_str(&format!("- {issue}\n"));
+        }
+        md.push('\n');
+    }
+
+    md.push_str("## Non-breaking changes\n\n");
+    if report.non_breaking_issues.is_empty() {
+        md.push_str("_None._\n\n");
+    } else {
+        for issue in &report.non_breaking_issues {
+            md.push_str(&format!("- {issue}\n"));
+        }
+        md.push('\n');
+    }
+
+    md.push_str("## Recommendation\n\n");
+    if report.breaking {
+        md.push_str(
+            "This upgrade changes the public contract interface and will break existing clients.\n\
+             Do not ship without a client migration plan; acknowledge explicitly and document the\n\
+             compatibility break in the proposal.\n",
+        );
+    } else {
+        md.push_str(
+            "The new interface is backward compatible. Existing callers will continue to work.\n",
+        );
+    }
+    md.push_str(&format!(
+        "\n_Generated by `starforge upgrade auto diff` at {}_\n",
+        report.timestamp
+    ));
+
+    md
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -501,22 +718,20 @@ pub fn analyse_compat(
     let old_spec = decode_spec_model(old_bytes);
     let new_spec = decode_spec_model(new_bytes);
 
-    match (&old_spec, &new_spec) {
-        (Err(err), _) => issues.push(CompatIssue {
+    if let (Err(err), _) = (&old_spec, &new_spec) {
+        issues.push(CompatIssue {
             kind: "old-abi-metadata-missing".to_string(),
             severity: "warning".to_string(),
             description: format!("Unable to decode old contract ABI metadata: {err}"),
-        }),
-        _ => {}
+        })
     }
 
-    match (&old_spec, &new_spec) {
-        (_, Err(err)) => issues.push(CompatIssue {
+    if let (_, Err(err)) = (&old_spec, &new_spec) {
+        issues.push(CompatIssue {
             kind: "new-abi-metadata-missing".to_string(),
             severity: "warning".to_string(),
             description: format!("Unable to decode new contract ABI metadata: {err}"),
-        }),
-        _ => {}
+        })
     }
 
     let abi = match (&old_spec, &new_spec) {
@@ -1253,77 +1468,7 @@ mod tests {{
     )
 }
 
-fn read_spec_entries(wasm: &[u8]) -> Result<Vec<ScSpecEntry>> {
-    let spec = contract_spec_section(wasm)?;
-    let cursor = Cursor::new(spec);
-    let entries = ScSpecEntry::read_xdr_iter(&mut Limited::new(
-        cursor,
-        Limits {
-            depth: 500,
-            len: 0x1000000,
-        },
-    ))
-    .collect::<std::result::Result<Vec<_>, _>>()
-    .context("Failed to decode contractspecv0 XDR metadata")?;
-    Ok(entries)
-}
-
-fn contract_spec_section(wasm: &[u8]) -> Result<&[u8]> {
-    if wasm.len() < 8 || &wasm[0..4] != b"\0asm" {
-        anyhow::bail!("Input is not a valid WASM binary");
-    }
-
-    let mut offset = 8;
-    while offset < wasm.len() {
-        let section_id = wasm[offset];
-        offset += 1;
-        let section_len = read_var_u32(wasm, &mut offset)? as usize;
-        let section_end = offset
-            .checked_add(section_len)
-            .filter(|end| *end <= wasm.len())
-            .ok_or_else(|| anyhow::anyhow!("Malformed WASM section length"))?;
-
-        if section_id == 0 {
-            let mut section_offset = offset;
-            let name_len = read_var_u32(wasm, &mut section_offset)? as usize;
-            let name_end = section_offset
-                .checked_add(name_len)
-                .filter(|end| *end <= section_end)
-                .ok_or_else(|| anyhow::anyhow!("Malformed WASM custom section name"))?;
-            let name = std::str::from_utf8(&wasm[section_offset..name_end])
-                .context("WASM custom section name is not UTF-8")?;
-            if name == "contractspecv0" {
-                return Ok(&wasm[name_end..section_end]);
-            }
-        }
-
-        offset = section_end;
-    }
-
-    anyhow::bail!("No contractspecv0 metadata section found in WASM")
-}
-
-fn read_var_u32(bytes: &[u8], offset: &mut usize) -> Result<u32> {
-    let mut result = 0u32;
-    let mut shift = 0;
-
-    loop {
-        let byte = *bytes
-            .get(*offset)
-            .ok_or_else(|| anyhow::anyhow!("Unexpected end of WASM while reading LEB128"))?;
-        *offset += 1;
-        result |= ((byte & 0x7f) as u32) << shift;
-
-        if byte & 0x80 == 0 {
-            return Ok(result);
-        }
-
-        shift += 7;
-        if shift >= 35 {
-            anyhow::bail!("Invalid u32 LEB128 value in WASM");
-        }
-    }
-}
+use crate::utils::bindings::read_spec_entries;
 
 fn spec_type_name(type_def: &ScSpecTypeDef) -> String {
     match type_def {
@@ -1376,12 +1521,44 @@ fn spec_type_name(type_def: &ScSpecTypeDef) -> String {
 pub async fn handle(cmd: UpgradeAutoCommands) -> Result<()> {
     match cmd {
         UpgradeAutoCommands::Compat(args) => handle_compat(args),
+        UpgradeAutoCommands::Diff(args) => handle_diff(args),
         UpgradeAutoCommands::Plan(args) => handle_plan(args),
         UpgradeAutoCommands::Apply(args) => handle_apply(args),
         UpgradeAutoCommands::Migration(args) => handle_migration(args),
         UpgradeAutoCommands::Plans(args) => handle_plans(args),
         UpgradeAutoCommands::Rollback(args) => handle_rollback(args),
     }
+}
+
+fn handle_diff(args: DiffArgs) -> Result<()> {
+    let old_bytes = read_valid_wasm(&args.old_wasm)?;
+    let new_bytes = read_valid_wasm(&args.new_wasm)?;
+
+    let report = analyse_interface(&old_bytes, &new_bytes);
+
+    let rendered = if args.format == "markdown" {
+        render_interface_diff_markdown(&report)
+    } else {
+        serde_json::to_string_pretty(&report)?
+    };
+    println!("{rendered}");
+
+    if let Some(out) = &args.out {
+        fs::write(out, &rendered).with_context(|| {
+            format!("Failed to write interface diff report to {}", out.display())
+        })?;
+        p::info(&format!("Report written to {}", out.display()));
+    }
+
+    if report.breaking && !args.acknowledge {
+        anyhow::bail!(
+            "Breaking interface change detected: old wasm exposes a public interface \
+             that the new wasm no longer guarantees. Re-run with --acknowledge to \
+             confirm this is intended (extends the acknowledgment to governance)."
+        );
+    }
+
+    Ok(())
 }
 
 fn handle_compat(args: CompatArgs) -> Result<()> {
@@ -1640,11 +1817,11 @@ fn handle_plans(args: PlansArgs) -> Result<()> {
     let plans = load_plans()?;
     let filtered: Vec<_> = plans
         .iter()
-        .filter(|p| args.network.as_deref().is_none_or(|n| p.network == n))
+        .filter(|p| args.network.as_deref().map_or(true, |n| p.network == n))
         .filter(|p| {
             args.contract_id
                 .as_deref()
-                .is_none_or(|c| p.contract_id == c)
+                .map_or(true, |c| p.contract_id == c)
         })
         .collect();
 
@@ -1919,7 +2096,6 @@ fn short_id(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     use stellar_xdr::curr::{
         Limits, ScSpecEntry, ScSpecFunctionInputV0, ScSpecFunctionV0, ScSpecTypeDef, ScSpecTypeUdt,
         ScSpecUdtStructFieldV0, ScSpecUdtStructV0, ScSymbol, StringM, VecM, WriteXdr,
@@ -2190,5 +2366,143 @@ mod tests {
         assert_eq!(PlanStatus::Applied.to_string(), "applied");
         assert_eq!(PlanStatus::RolledBack.to_string(), "rolled-back");
         assert_eq!(PlanStatus::Failed.to_string(), "failed");
+    }
+
+    #[test]
+    fn interface_diff_flags_removed_method_as_breaking() {
+        let old = spec_wasm(
+            vec![abi_function_entry(
+                "transfer",
+                vec![
+                    ("to", ScSpecTypeDef::Address),
+                    ("amount", ScSpecTypeDef::I128),
+                ],
+                ScSpecTypeDef::I128,
+            )],
+            b"",
+        );
+        let new = spec_wasm(vec![], b"");
+        let report = analyse_interface(&old, &new);
+        assert!(report.breaking);
+        assert_eq!(report.removed_functions, vec!["transfer".to_string()]);
+        assert!(report
+            .breaking_issues
+            .iter()
+            .any(|i| i.contains("transfer")));
+    }
+
+    #[test]
+    fn interface_diff_flags_signature_change_as_breaking() {
+        let old = spec_wasm(
+            vec![abi_function_entry("load", vec![], ScSpecTypeDef::U32)],
+            b"",
+        );
+        let new = spec_wasm(
+            vec![abi_function_entry("load", vec![], ScSpecTypeDef::U64)],
+            b"",
+        );
+        let report = analyse_interface(&old, &new);
+        assert!(report.breaking);
+        assert_eq!(report.changed_functions.len(), 1);
+        assert_eq!(report.changed_functions[0].name, "load");
+        assert_ne!(
+            report.changed_functions[0].before,
+            report.changed_functions[0].after
+        );
+    }
+
+    #[test]
+    fn interface_diff_flags_type_removal_as_breaking() {
+        let old = spec_wasm(
+            vec![abi_struct_entry(
+                "Config",
+                vec![("count", ScSpecTypeDef::U32)],
+            )],
+            b"",
+        );
+        let new = spec_wasm(vec![], b"");
+        let report = analyse_interface(&old, &new);
+        assert!(report.breaking);
+        assert!(report.removed_types.contains(&"Config".to_string()));
+    }
+
+    #[test]
+    fn interface_diff_flags_auth_surface_removal_as_breaking() {
+        let old = {
+            let mut v = spec_wasm(vec![], b"");
+            v.extend_from_slice(b"require_auth");
+            v
+        };
+        let new = spec_wasm(vec![], b"");
+        let report = analyse_interface(&old, &new);
+        assert!(report.breaking);
+        assert!(report.auth_surface_changed);
+        assert!(report
+            .breaking_issues
+            .iter()
+            .any(|i| i.contains("require_auth")));
+    }
+
+    #[test]
+    fn interface_diff_compatible_additions_are_non_breaking() {
+        let old = spec_wasm(
+            vec![abi_function_entry("a", vec![], ScSpecTypeDef::U32)],
+            b"",
+        );
+        let new = spec_wasm(
+            vec![abi_function_entry("b", vec![], ScSpecTypeDef::U32)],
+            b"",
+        );
+        let report = analyse_interface(&old, &new);
+        assert!(!report.breaking);
+        assert_eq!(report.added_functions, vec!["b".to_string()]);
+        assert!(report.breaking_issues.is_empty());
+        assert!(report
+            .non_breaking_issues
+            .iter()
+            .any(|i| i.contains("Added ABI function")));
+    }
+
+    #[test]
+    fn interface_diff_identical_binaries_are_non_breaking() {
+        let wasm = spec_wasm(
+            vec![abi_function_entry("a", vec![], ScSpecTypeDef::U32)],
+            b"",
+        );
+        let report = analyse_interface(&wasm, &wasm);
+        assert!(!report.breaking);
+        assert_eq!(report.old_hash, report.new_hash);
+    }
+
+    #[test]
+    fn interface_diff_markdown_renders_verdict_and_sections() {
+        let old = spec_wasm(
+            vec![abi_function_entry("remove_me", vec![], ScSpecTypeDef::U32)],
+            b"",
+        );
+        let new = spec_wasm(vec![], b"");
+        let md = render_interface_diff_markdown(&analyse_interface(&old, &new));
+        assert!(md.contains("# Contract Interface Diff Report"));
+        assert!(md.contains("**Verdict:** `BREAKING`"));
+        assert!(md.contains("## Breaking changes"));
+        assert!(md.contains("remove_me"));
+        assert!(md.contains("## Recommendation"));
+
+        let compatible = render_interface_diff_markdown(&analyse_interface(&new, &new));
+        assert!(compatible.contains("**Verdict:** `COMPATIBLE`"));
+        assert!(compatible.contains("## Non-breaking changes"));
+    }
+
+    #[test]
+    fn interface_diff_json_is_serializable() {
+        let wasm = spec_wasm(
+            vec![abi_function_entry("a", vec![], ScSpecTypeDef::U32)],
+            b"",
+        );
+        let report = analyse_interface(&wasm, &wasm);
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("\"breaking\":false"));
+        let decoded: InterfaceDiffReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.old_hash, report.old_hash);
     }
 }

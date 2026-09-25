@@ -436,8 +436,11 @@ impl AIService for OllamaAdapter {
     }
 }
 
+/// Registered AI service backends, keyed by provider.
+type ProviderMap = RwLock<HashMap<AIProvider, Arc<Mutex<Box<dyn AIService>>>>>;
+
 pub struct AIServiceManager {
-    providers: RwLock<HashMap<AIProvider, Arc<Mutex<Box<dyn AIService>>>>>,
+    providers: ProviderMap,
     circuit_breakers: RwLock<HashMap<AIProvider, Arc<Mutex<CircuitBreaker>>>>,
     fallback_order: Vec<AIProvider>,
     provider_models: HashMap<AIProvider, String>,
@@ -740,7 +743,7 @@ mod tests {
 
     #[test]
     fn test_circuit_breaker_starts_closed() {
-        let cb = CircuitBreaker::new(3, 60);
+        let mut cb = CircuitBreaker::new(3, 60);
         assert!(cb.is_available());
     }
 

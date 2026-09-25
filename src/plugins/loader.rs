@@ -5,10 +5,10 @@ use crate::plugins::interface::{
 };
 use crate::plugins::manifest;
 use crate::plugins::registry::{load_registry, TrustLevel};
+use crate::plugins::wasm::{SandboxedWasmPlugin, WasmSandboxPolicy};
 use anyhow::Result;
-use libloading::{Library, Symbol};
+use libloading::Library;
 use std::collections::HashMap;
-use std::ffi::OsStr;
 use std::path::Path;
 use std::rc::Rc;
 
@@ -43,6 +43,14 @@ pub enum PluginLoadError {
     RegistrationRuntimePanic { path: String, detail: String },
     /// The plugin requested capabilities not permitted by its trust level.
     PermissionDenied { path: String, capabilities: String },
+    /// The publisher signature verification failed.
+    VerificationFailed {
+        path: String,
+        status: String,
+        detail: String,
+    },
+    /// The plugin publisher signature is valid but key is untrusted.
+    UntrustedPublisher { path: String, publisher_key: String },
 }
 
 impl PluginLoadError {
@@ -56,6 +64,8 @@ impl PluginLoadError {
             Self::ManifestIncompatible { .. } => "manifest_incompatible",
             Self::RegistrationRuntimePanic { .. } => "runtime_panic",
             Self::PermissionDenied { .. } => "permission_denied",
+            Self::VerificationFailed { .. } => "verification_failed",
+            Self::UntrustedPublisher { .. } => "untrusted_publisher",
         }
     }
 
@@ -102,6 +112,17 @@ impl PluginLoadError {
                 "Plugin at '{path}' requested denied capabilities: {capabilities}.\n  \
                  Fix: Install from a trusted source or adjust its manifest requirements.",
             ),
+            Self::VerificationFailed { path, status, detail } => format!(
+                "Plugin signature verification failed for '{path}'.\n  \
+                 Status: {status}\n  \
+                 Detail: {detail}\n  \
+                 Fix: Rebuild/re-sign the plugin or install from a verified publisher.",
+            ),
+            Self::UntrustedPublisher { path, publisher_key } => format!(
+                "Plugin at '{path}' signed by untrusted publisher '{publisher_key}'.\n  \
+                 Fix: Add publisher key to 'plugin_trust.trusted_publishers' in config \
+                 or install from a trusted publisher.",
+            ),
         }
     }
 }
@@ -113,6 +134,16 @@ impl std::fmt::Display for PluginLoadError {
 }
 
 impl std::error::Error for PluginLoadError {}
+
+fn format_panic_detail(payload: &dyn std::any::Any) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "Unknown panic origin".to_string()
+    }
+}
 
 pub struct PluginManager {
     /// Maps plugin name → (plugin, core_version it was built against).
@@ -137,6 +168,17 @@ impl PluginManager {
         }
     }
 
+    /// Load and execute a WebAssembly plugin under the default capability-free
+    /// policy. Native plugins remain a legacy compatibility path and must be
+    /// explicitly enabled with the `unsafe-native-plugins` feature.
+    pub fn load_wasm_plugin<P: AsRef<Path>>(
+        &self,
+        path: P,
+        policy: WasmSandboxPolicy,
+    ) -> Result<SandboxedWasmPlugin> {
+        SandboxedWasmPlugin::load(path, policy)
+    }
+
     /// # Safety
     /// The caller must ensure the plugin at `path` is a valid StarForge plugin
     /// compiled with a compatible Rust toolchain and ABI.
@@ -157,160 +199,159 @@ impl PluginManager {
         let path_ref = path.as_ref();
         let path_display = path_ref.to_string_lossy().to_string();
 
-        // ── Open the shared library ──────────────────────────────────────────
-        let library =
-            Library::new(path_ref.as_os_str()).map_err(|e| PluginLoadError::InvalidLibrary {
-                path: path_display.clone(),
-                detail: e.to_string(),
-            })?;
-        let library = Rc::new(library);
-
-        // ── Locate the required export symbol ────────────────────────────────
-        let mut standard_decl = None;
-        let mut ai_decl = None;
-
-        if let Ok(d) = library.get::<*mut PluginDeclaration>(b"PLUGIN_DECLARATION") {
-            standard_decl = Some(*d);
-        } else if let Ok(d) = library.get::<*mut AIPluginDeclaration>(b"AI_PLUGIN_DECLARATION") {
-            ai_decl = Some(*d);
-        } else {
-            return Err(PluginLoadError::MissingRequiredSymbol {
-                path: path_display.clone(),
-                symbol: "PLUGIN_DECLARATION or AI_PLUGIN_DECLARATION".to_string(),
-            });
-        }
-
-        let (rustc_version, core_version) = if let Some(d) = standard_decl {
-            let d = unsafe { &*d };
-            (d.rustc_version, d.core_version)
-        } else if let Some(d) = ai_decl {
-            let d = unsafe { &*d };
-            (d.rustc_version, d.core_version)
-        } else {
-            unreachable!()
-        };
-
-        // ── rustc ABI check ──────────────────────────────────────────────────
-        if rustc_version != RUSTC_VERSION {
-            return Err(PluginLoadError::AbiBuildMismatch {
+        #[cfg(not(feature = "unsafe-native-plugins"))]
+        {
+            let _ = path_ref;
+            Err(PluginLoadError::PermissionDenied {
                 path: path_display,
-                plugin_rustc: rustc_version.to_string(),
-                required_rustc: RUSTC_VERSION.to_string(),
-            });
+                capabilities:
+                    "native plugin loading is disabled; enable the unsafe-native-plugins feature"
+                        .into(),
+            })
         }
 
-        // ── StarForge core version check ─────────────────────────────────────
-        if !is_core_version_compatible(core_version) {
-            return Err(PluginLoadError::UnsupportedCoreVersion {
-                path: path_display,
-                plugin_core: core_version.to_string(),
-                running_core: CORE_VERSION.to_string(),
-            });
-        }
+        #[cfg(feature = "unsafe-native-plugins")]
+        {
+            // ── Pre-load manifest compatibility validation ───────────────────────
+            // Inspect and validate manifest *before* opening binary with Library::new()
+            // to prevent OS-level linker panics or ABI crashes on incompatible libraries.
+            if let Ok(Some(mf)) = manifest::load_manifest_for_library(Path::new(path_ref)) {
+                mf.validate()
+                    .map_err(|e| PluginLoadError::ManifestIncompatible {
+                        path: path_display.clone(),
+                        detail: e.to_string(),
+                    })?;
+            }
 
-        // ── Manifest compatibility (if present beside the library) ───────────
-        if let Ok(Some(mf)) = manifest::load_manifest_for_library(Path::new(path_ref)) {
-            mf.validate()
-                .map_err(|e| PluginLoadError::ManifestIncompatible {
+            // ── Open the shared library ──────────────────────────────────────────
+            let library = Library::new(path_ref.as_os_str()).map_err(|e| {
+                PluginLoadError::InvalidLibrary {
                     path: path_display.clone(),
                     detail: e.to_string(),
-                })?;
-        }
+                }
+            })?;
+            let library = Rc::new(library);
 
-        let registry = load_registry().unwrap_or_default();
-        let plugin_trust = registry
-            .plugins
-            .iter()
-            .find(|p| p.path == path_display)
-            .map(|p| p.trust.clone())
-            .unwrap_or(TrustLevel::Unknown);
+            // ── Locate the required export symbol ────────────────────────────────
+            let mut standard_decl = None;
+            let mut ai_decl = None;
 
-        if let Some(decl) = standard_decl {
-            let decl = unsafe { &*decl };
-            let mut registrar = ProxyRegistrar::new();
-
-            // Protect the system execution loop from third-party registration panics
-            let register_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                (decl.register)(&mut registrar);
-            }));
-
-            if let Err(panic_payload) = register_result {
-                let detail = if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                    s.to_string()
-                } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "Unknown closure panic origin".to_string()
-                };
-                return Err(PluginLoadError::RegistrationRuntimePanic {
-                    path: path_display,
-                    detail,
+            if let Ok(d) = library.get::<*mut PluginDeclaration>(b"PLUGIN_DECLARATION") {
+                standard_decl = Some(*d);
+            } else if let Ok(d) = library.get::<*mut AIPluginDeclaration>(b"AI_PLUGIN_DECLARATION")
+            {
+                ai_decl = Some(*d);
+            } else {
+                return Err(PluginLoadError::MissingRequiredSymbol {
+                    path: path_display.clone(),
+                    symbol: "PLUGIN_DECLARATION or AI_PLUGIN_DECLARATION".to_string(),
                 });
             }
 
-            let plugin_core_version = decl.core_version.to_string();
-            for plugin in registrar.plugins {
-                let name = plugin.name().to_string();
-                plugin.on_load();
-                self.plugins
-                    .insert(name, (plugin, plugin_core_version.clone()));
-            }
-        } else if let Some(decl) = ai_decl {
-            let decl = unsafe { &*decl };
-            let mut registrar = AIProxyRegistrar::new();
+            let (rustc_version, core_version) = if let Some(d) = standard_decl {
+                let d = unsafe { &*d };
+                (d.rustc_version, d.core_version)
+            } else if let Some(d) = ai_decl {
+                let d = unsafe { &*d };
+                (d.rustc_version, d.core_version)
+            } else {
+                unreachable!()
+            };
 
-            let register_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                (decl.register)(&mut registrar);
-            }));
-
-            if let Err(panic_payload) = register_result {
-                let detail = if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                    s.to_string()
-                } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "Unknown closure panic origin".to_string()
-                };
-                return Err(PluginLoadError::RegistrationRuntimePanic {
+            // ── rustc ABI check ──────────────────────────────────────────────────
+            if rustc_version != RUSTC_VERSION {
+                return Err(PluginLoadError::AbiBuildMismatch {
                     path: path_display,
-                    detail,
+                    plugin_rustc: rustc_version.to_string(),
+                    required_rustc: RUSTC_VERSION.to_string(),
                 });
             }
 
-            let plugin_core_version = decl.core_version.to_string();
-            for plugin in registrar.plugins {
-                let capabilities = plugin.capabilities();
+            // ── StarForge core version check ─────────────────────────────────────
+            if !is_core_version_compatible(core_version) {
+                return Err(PluginLoadError::UnsupportedCoreVersion {
+                    path: path_display,
+                    plugin_core: core_version.to_string(),
+                    running_core: CORE_VERSION.to_string(),
+                });
+            }
 
-                // Permission sandbox enforcement
-                if plugin_trust == TrustLevel::Unknown {
-                    let mut denied = Vec::new();
-                    for cap in &capabilities {
-                        match cap {
-                            AICapability::NetworkAccess
-                            | AICapability::FileSystemAccess
-                            | AICapability::ExecuteCode => {
-                                denied.push(format!("{:?}", cap));
-                            }
-                            _ => {}
-                        }
-                    }
-                    if !denied.is_empty() {
-                        return Err(PluginLoadError::PermissionDenied {
-                            path: path_display,
-                            capabilities: denied.join(", "),
-                        });
-                    }
+            let registry = load_registry().unwrap_or_default();
+            let plugin_trust = registry
+                .plugins
+                .iter()
+                .find(|p| p.path == path_display)
+                .map(|p| p.trust.clone())
+                .unwrap_or(TrustLevel::Unknown);
+
+            if let Some(decl) = standard_decl {
+                let decl = unsafe { &*decl };
+                let mut registrar = ProxyRegistrar::new();
+
+                // Protect the system execution loop from third-party registration panics
+                let register_result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        (decl.register)(&mut registrar);
+                    }));
+
+                if let Err(panic_payload) = register_result {
+                    let detail = format_panic_detail(panic_payload.as_ref());
+                    return Err(PluginLoadError::RegistrationRuntimePanic {
+                        path: path_display,
+                        detail,
+                    });
                 }
 
-                let name = plugin.name().to_string();
-                self.ai_plugins
-                    .insert(name, (plugin, plugin_core_version.clone()));
+                let plugin_core_version = decl.core_version.to_string();
+                for plugin in registrar.plugins {
+                    let name = plugin.name().to_string();
+                    let on_load_result =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            plugin.on_load();
+                        }));
+                    if let Err(panic_payload) = on_load_result {
+                        let detail = format_panic_detail(panic_payload.as_ref());
+                        return Err(PluginLoadError::RegistrationRuntimePanic {
+                            path: path_display.clone(),
+                            detail,
+                        });
+                    }
+                    self.plugins
+                        .insert(name, (plugin, plugin_core_version.clone()));
+                }
+            } else if let Some(decl) = ai_decl {
+                let decl = unsafe { &*decl };
+                let mut registrar = AIProxyRegistrar::new();
+
+                let register_result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        (decl.register)(&mut registrar);
+                    }));
+
+                if let Err(panic_payload) = register_result {
+                    let detail = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "Unknown closure panic origin".to_string()
+                    };
+                    return Err(PluginLoadError::RegistrationRuntimePanic {
+                        path: path_display,
+                        detail,
+                    });
+                }
+
+                    let name = plugin.name().to_string();
+                    self.ai_plugins
+                        .insert(name, (plugin, plugin_core_version.clone()));
+                }
             }
+
+            self.libraries.push(library);
+
+            Ok(())
         }
-
-        self.libraries.push(library);
-
-        Ok(())
     }
 
     /// Returns `(name, description, built_for_core_version)` for every loaded plugin.
@@ -330,10 +371,22 @@ impl PluginManager {
     }
 
     pub fn execute(&self, name: &str, args: &[String]) -> Result<(), String> {
-        if let Some((plugin, _)) = self.plugins.get(name) {
-            plugin.execute(args)
-        } else {
-            return Err(format!("Plugin '{}' not found", name));
+        let (plugin, _) = self
+            .plugins
+            .get(name)
+            .ok_or_else(|| format!("Plugin '{}' not found", name))?;
+
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| plugin.execute(args)));
+
+        match result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(err)) => Err(format!("Plugin '{}' failed to execute: {}", name, err)),
+            Err(panic_payload) => Err(format!(
+                "Plugin '{}' panicked during execution: {}",
+                name,
+                format_panic_detail(panic_payload.as_ref())
+            )),
         }
     }
 }
@@ -529,7 +582,52 @@ mod tests {
             Err(PluginLoadError::InvalidLibrary { path, .. }) => {
                 assert!(path.contains("plugin.so"));
             }
+            Err(PluginLoadError::PermissionDenied { capabilities, .. }) => {
+                assert!(capabilities.contains("unsafe-native-plugins"));
+            }
             other => panic!("Expected InvalidLibrary, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn plugin_execute_panics_are_isolated() {
+        struct PanicPlugin;
+
+        impl Plugin for PanicPlugin {
+            fn name(&self) -> &'static str {
+                "panic-plugin"
+            }
+            fn version(&self) -> &'static str {
+                "0.1.0"
+            }
+            fn description(&self) -> &'static str {
+                "panic plugin"
+            }
+            fn execute(&self, _args: &[String]) -> Result<(), String> {
+                panic!("forced execution panic");
+            }
+        }
+
+        let mut pm = PluginManager::new();
+        pm.plugins.insert(
+            "panic-plugin".to_string(),
+            (Box::new(PanicPlugin), "0.1.0".to_string()),
+        );
+
+        let result = pm.execute("panic-plugin", &[]);
+        assert!(result.is_err(), "plugin execution panic should be caught");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("panicked during execution") || err.contains("forced execution panic")
+        );
+    }
+
+    #[test]
+    fn unknown_plugin_execution_reports_clear_error() {
+        let pm = PluginManager::new();
+        let result = pm.execute("missing-plugin", &[]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("not found"));
     }
 }

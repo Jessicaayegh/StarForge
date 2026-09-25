@@ -1,14 +1,16 @@
 use crate::utils::{
     config,
     event_monitoring::{
-        AlertEngine, EventAnalytics, EventRouter, EventStore, EventTrigger, PersistedEvent,
+        severity_rank, AlertEngine, EventAlert, EventAnalytics, EventRouter, EventStore,
+        EventTrigger, PersistedEvent,
     },
     horizon, notifications, print as p, soroban,
     stream::{EventStreamFilters, EventStreamTransport, SorobanEvent, SorobanEventStream},
 };
 use anyhow::Result;
 use clap::Args;
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -54,9 +56,19 @@ pub struct MonitorArgs {
     #[arg(long = "route")]
     pub routes: Vec<String>,
 
-    /// Alert rule as pattern, severity:pattern, or severity:pattern:message (repeatable)
+    /// Alert rule as pattern, severity:pattern, or severity:pattern:message (repeatable).
+    /// Patterns support `field~text` (type, topic, value, id), `ledger>=N`, `!term`, `a&b`, `a|b`
     #[arg(long = "alert")]
     pub alerts: Vec<String>,
+
+    /// Rate alert fired when a pattern matches COUNT events within LEDGERS ledgers:
+    /// [severity:]pattern:COUNT/LEDGERS[:message] (repeatable)
+    #[arg(long = "alert-rate")]
+    pub alert_rates: Vec<String>,
+
+    /// Forward alerts at or above this severity to configured notification channels
+    #[arg(long, value_name = "SEVERITY", value_parser = ["info", "low", "medium", "high", "critical"])]
+    pub notify: Option<String>,
 
     /// Persist matching events to JSONL; omit PATH to use ~/.starforge/events/<network>-<contract>.jsonl
     #[arg(
@@ -70,6 +82,14 @@ pub struct MonitorArgs {
     /// Replay a JSONL event store instead of connecting to RPC
     #[arg(long)]
     pub replay: Option<PathBuf>,
+
+    /// First ledger (inclusive) to include when replaying
+    #[arg(long, requires = "replay")]
+    pub from_ledger: Option<u32>,
+
+    /// Last ledger (inclusive) to include when replaying
+    #[arg(long, requires = "replay")]
+    pub to_ledger: Option<u32>,
 
     /// Render a live/replay analytics dashboard
     #[arg(long)]
@@ -116,37 +136,18 @@ pub async fn handle(args: MonitorArgs) -> Result<()> {
     println!();
 
     match (&args.contract, &args.wallet) {
-        (Some(contract_id), None) => {
-            monitor_contract(
-                contract_id,
-                args.events.as_deref(),
-                args.event_type.as_deref(),
-                args.topic.as_deref(),
-                args.value.as_deref(),
-                network,
-                args.interval,
-                args.follow,
-                &args.transport,
-                args.websocket_url.as_deref(),
-                &args.routes,
-                &args.alerts,
-                args.persist.as_ref(),
-                args.replay.as_ref(),
-                args.dashboard,
-                &args.triggers,
-                args.allow_triggers,
-            )
-            .await
-        }
+        (Some(contract_id), None) => monitor_contract(contract_id, &args, network).await,
         (None, Some(wallet_name)) => {
             if args.replay.is_some()
                 || args.persist.is_some()
                 || !args.routes.is_empty()
                 || !args.alerts.is_empty()
+                || !args.alert_rates.is_empty()
                 || !args.triggers.is_empty()
+                || args.notify.is_some()
             {
                 anyhow::bail!(
-                    "event stream options (--replay/--persist/--route/--alert/--trigger) are only supported with --contract"
+                    "event stream options (--replay/--persist/--route/--alert/--alert-rate/--trigger/--notify) are only supported with --contract"
                 );
             }
             monitor_wallet(
@@ -162,60 +163,151 @@ pub async fn handle(args: MonitorArgs) -> Result<()> {
     }
 }
 
-async fn monitor_contract(
-    contract_id: &str,
-    events_filter: Option<&str>,
-    event_type: Option<&str>,
-    topic: Option<&str>,
-    value: Option<&str>,
-    network: &str,
-    interval: u64,
-    follow: bool,
-    transport: &str,
-    websocket_url: Option<&str>,
-    routes: &[String],
-    alerts: &[String],
-    persist: Option<&PathBuf>,
-    replay: Option<&PathBuf>,
-    dashboard: bool,
-    trigger_specs: &[String],
-    allow_triggers: bool,
-) -> Result<()> {
+/// Routing, alerting, triggers, persistence, and analytics applied to every
+/// event that passes the monitor filters, for both live streams and replays.
+struct EventPipeline<'a> {
+    network: &'a str,
+    contract_id: &'a str,
+    router: EventRouter,
+    alert_engine: AlertEngine,
+    triggers: Vec<EventTrigger>,
+    event_store: Option<EventStore>,
+    notify_min_severity: Option<u8>,
+    analytics: EventAnalytics,
+}
+
+impl EventPipeline<'_> {
+    fn process(&mut self, event: &SorobanEvent) -> Result<()> {
+        let routes = self.router.route(event);
+        let alerts = self.alert_engine.evaluate(event);
+
+        notifications::success(&format!(
+            "Ledger {} event {} [{}]: {}",
+            event.ledger, event.id, event.event_type, event.value
+        ));
+
+        if !routes.is_empty() {
+            notifications::info(&format!("Event routed to: {}", routes.join(", ")));
+        }
+
+        for alert in &alerts {
+            notifications::alert(&format!(
+                "[{}] {} (rule {}) on event {}",
+                alert.severity, alert.message, alert.rule_id, event.id
+            ));
+            self.forward_alert(alert, event);
+        }
+
+        for trigger in self
+            .triggers
+            .iter()
+            .filter(|trigger| trigger.matches(event))
+        {
+            notifications::info(&format!(
+                "Executing trigger for pattern '{}': {}",
+                trigger.pattern, trigger.command
+            ));
+            if let Err(err) = trigger.execute(self.network, self.contract_id, event) {
+                notifications::warn(&format!("Trigger failed: {}", err));
+            }
+        }
+
+        let persisted = PersistedEvent::new(
+            self.network,
+            self.contract_id,
+            event.clone(),
+            routes,
+            alerts,
+        );
+        if let Some(store) = &self.event_store {
+            store.persist(&persisted)?;
+        }
+        self.analytics.record(&persisted);
+
+        Ok(())
+    }
+
+    /// Send an alert to the configured notification channels when it meets
+    /// the `--notify` severity threshold. Delivery failures never stop the stream.
+    fn forward_alert(&self, alert: &EventAlert, event: &SorobanEvent) {
+        let Some(min) = self.notify_min_severity else {
+            return;
+        };
+        if severity_rank(&alert.severity) < min {
+            return;
+        }
+        let data = HashMap::from([
+            ("message".to_string(), alert.message.clone()),
+            ("rule_id".to_string(), alert.rule_id.clone()),
+            ("network".to_string(), self.network.to_string()),
+            ("contract_id".to_string(), self.contract_id.to_string()),
+            ("event_id".to_string(), event.id.clone()),
+            ("ledger".to_string(), event.ledger.to_string()),
+        ]);
+        if let Err(err) =
+            notifications::send_notification("contract_event_alert", &data, &alert.severity)
+        {
+            notifications::warn(&format!("Alert notification failed: {}", err));
+        }
+    }
+}
+
+async fn monitor_contract(contract_id: &str, args: &MonitorArgs, network: &str) -> Result<()> {
     config::validate_contract_id(contract_id)?;
 
-    let legacy_filter_set = parse_legacy_filter(events_filter);
-    let stream_filters = build_stream_filters(event_type, topic, value);
-    let router = EventRouter::from_specs(routes)?;
-    let alert_engine = AlertEngine::from_specs(alerts)?;
-    let triggers = EventTrigger::from_specs(trigger_specs)?;
-    if !triggers.is_empty() && !allow_triggers {
+    let legacy_filter_set = parse_legacy_filter(args.events.as_deref());
+    let stream_filters = build_stream_filters(
+        args.event_type.as_deref(),
+        args.topic.as_deref(),
+        args.value.as_deref(),
+    );
+    let triggers = EventTrigger::from_specs(&args.triggers)?;
+    if !triggers.is_empty() && !args.allow_triggers {
         anyhow::bail!(
             "event triggers execute shell commands; rerun with --allow-triggers to enable them"
         );
     }
 
-    if let Some(replay_path) = replay {
+    let event_store = match (&args.replay, &args.persist) {
+        // Replays never re-persist events they are reading back.
+        (Some(_), _) | (None, None) => None,
+        (None, Some(path)) if path == &PathBuf::from(DEFAULT_PERSIST_SENTINEL) => Some(
+            EventStore::new(EventStore::default_path(network, contract_id)?),
+        ),
+        (None, Some(path)) => Some(EventStore::new(path.clone())),
+    };
+
+    let mut pipeline = EventPipeline {
+        network,
+        contract_id,
+        router: EventRouter::from_specs(&args.routes)?,
+        alert_engine: AlertEngine::from_all_specs(&args.alerts, &args.alert_rates)?,
+        triggers,
+        event_store,
+        notify_min_severity: args.notify.as_deref().map(severity_rank),
+        analytics: EventAnalytics::default(),
+    };
+
+    if let Some(replay_path) = &args.replay {
         return replay_contract_events(
-            contract_id,
-            network,
+            &mut pipeline,
             replay_path,
+            args.from_ledger,
+            args.to_ledger,
             &legacy_filter_set,
             &stream_filters,
-            &router,
-            &alert_engine,
-            &triggers,
-            dashboard,
+            args.dashboard,
         );
     }
 
     let rpc_url = soroban::rpc_url(network)?;
-    let transport = EventStreamTransport::parse(transport)?;
+    let transport = EventStreamTransport::parse(&args.transport)?;
     let mut stream = SorobanEventStream::new(rpc_url.clone(), contract_id.to_string())
-        .with_poll_interval(interval)
+        .with_poll_interval(args.interval)
         .with_transport(transport)
         .with_filters(stream_filters.clone());
-    if let Some(url) = websocket_url {
-        stream = stream.with_websocket_url(url.to_string());
+    if let Some(url) = &args.websocket_url {
+        stream = stream.with_websocket_url(url.clone());
     }
 
     notifications::info(&format!("Streaming contract events from {}.", rpc_url));
@@ -230,24 +322,26 @@ async fn monitor_contract(
         p::kv("WebSocket", stream.websocket_url());
     }
 
-    let event_store = match persist {
-        Some(path) if path == &PathBuf::from(DEFAULT_PERSIST_SENTINEL) => Some(EventStore::new(
-            EventStore::default_path(network, contract_id)?,
-        )),
-        Some(path) => Some(EventStore::new(path.clone())),
-        None => None,
-    };
-    if let Some(store) = &event_store {
+    if let Some(store) = &pipeline.event_store {
         p::kv("Event store", &store.path().display().to_string());
     }
-    if !router.is_empty() {
-        p::kv("Routing", &format!("{} route(s)", routes.len()));
+    if !pipeline.router.is_empty() {
+        p::kv("Routing", &format!("{} route(s)", args.routes.len()));
     }
-    if !alerts.is_empty() {
-        p::kv("Alerts", &format!("{} rule(s)", alerts.len()));
+    if pipeline.alert_engine.rule_count() > 0 {
+        p::kv(
+            "Alerts",
+            &format!("{} rule(s)", pipeline.alert_engine.rule_count()),
+        );
     }
-    if !triggers.is_empty() {
-        p::kv("Triggers", &format!("{} trigger(s)", triggers.len()));
+    if let Some(level) = &args.notify {
+        p::kv("Notify", &format!("alerts >= {}", level));
+    }
+    if !pipeline.triggers.is_empty() {
+        p::kv(
+            "Triggers",
+            &format!("{} trigger(s)", pipeline.triggers.len()),
+        );
     }
 
     let running = Arc::new(AtomicBool::new(true));
@@ -259,7 +353,6 @@ async fn monitor_contract(
     }
 
     let mut printed_any = false;
-    let mut analytics = EventAnalytics::default();
 
     while running.load(Ordering::SeqCst) {
         match stream.next_batch().await {
@@ -267,24 +360,15 @@ async fn monitor_contract(
                 for event in batch {
                     if matches_monitor_filters(&event, &legacy_filter_set, &stream_filters) {
                         printed_any = true;
-                        process_contract_event(
-                            network,
-                            contract_id,
-                            &event,
-                            &router,
-                            &alert_engine,
-                            event_store.as_ref(),
-                            &mut analytics,
-                            &triggers,
-                        )?;
+                        pipeline.process(&event)?;
                     }
                 }
 
-                if dashboard {
-                    println!("{}", analytics.render_dashboard());
+                if args.dashboard {
+                    println!("{}", pipeline.analytics.render_dashboard());
                 }
 
-                if !follow {
+                if !args.follow {
                     if !printed_any {
                         notifications::warn("No matching events in the latest batch.");
                     }
@@ -293,7 +377,7 @@ async fn monitor_contract(
                 stream.sleep().await;
             }
             Err(err) => {
-                if !follow && !printed_any {
+                if !args.follow && !printed_any {
                     return Err(err);
                 }
                 notifications::warn(&format!(
@@ -305,7 +389,7 @@ async fn monitor_contract(
         }
     }
 
-    if dashboard && printed_any {
+    if args.dashboard && printed_any {
         p::success("Final analytics dashboard rendered above");
     }
 
@@ -313,104 +397,52 @@ async fn monitor_contract(
 }
 
 fn replay_contract_events(
-    contract_id: &str,
-    network: &str,
-    replay_path: &PathBuf,
+    pipeline: &mut EventPipeline<'_>,
+    replay_path: &Path,
+    from_ledger: Option<u32>,
+    to_ledger: Option<u32>,
     legacy_filter_set: &Option<Vec<String>>,
     stream_filters: &EventStreamFilters,
-    router: &EventRouter,
-    alert_engine: &AlertEngine,
-    triggers: &[EventTrigger],
     dashboard: bool,
 ) -> Result<()> {
-    let store = EventStore::new(replay_path.clone());
-    let events = store.replay()?;
+    let store = EventStore::new(replay_path.to_path_buf());
+    let events = store.replay_range(from_ledger, to_ledger)?;
+    let range = match (from_ledger, to_ledger) {
+        (None, None) => String::new(),
+        (from, to) => format!(
+            " (ledgers {}..{})",
+            from.map(|l| l.to_string()).unwrap_or_default(),
+            to.map(|l| l.to_string()).unwrap_or_default()
+        ),
+    };
     notifications::info(&format!(
-        "Replaying {} persisted event(s) from {}.",
+        "Replaying {} persisted event(s) from {}{}.",
         events.len(),
-        replay_path.display()
+        replay_path.display(),
+        range
     ));
 
-    let mut analytics = EventAnalytics::default();
     let mut matched = 0usize;
 
     for persisted in events {
-        if persisted.contract_id != contract_id || persisted.network != network {
+        if persisted.contract_id != pipeline.contract_id || persisted.network != pipeline.network {
             continue;
         }
         if !matches_monitor_filters(&persisted.event, legacy_filter_set, stream_filters) {
             continue;
         }
         matched += 1;
-        process_contract_event(
-            network,
-            contract_id,
-            &persisted.event,
-            router,
-            alert_engine,
-            None,
-            &mut analytics,
-            triggers,
-        )?;
+        pipeline.process(&persisted.event)?;
     }
 
     if dashboard {
-        println!("{}", analytics.render_dashboard());
+        println!("{}", pipeline.analytics.render_dashboard());
     }
     if matched == 0 {
         notifications::warn(
             "No matching persisted events found for this contract/network/filter set.",
         );
     }
-    Ok(())
-}
-
-fn process_contract_event(
-    network: &str,
-    contract_id: &str,
-    event: &SorobanEvent,
-    router: &EventRouter,
-    alert_engine: &AlertEngine,
-    event_store: Option<&EventStore>,
-    analytics: &mut EventAnalytics,
-    triggers: &[EventTrigger],
-) -> Result<()> {
-    let routes = router.route(event);
-    let alerts = alert_engine.evaluate(event);
-
-    notifications::success(&format!(
-        "Ledger {} event {} [{}]: {}",
-        event.ledger, event.id, event.event_type, event.value
-    ));
-
-    if !routes.is_empty() {
-        notifications::info(&format!("Event routed to: {}", routes.join(", ")));
-    }
-
-    for alert in &alerts {
-        notifications::alert(&format!(
-            "[{}] {} (rule {}) on event {}",
-            alert.severity, alert.message, alert.rule_id, event.id
-        ));
-    }
-
-    for trigger in triggers.iter().filter(|trigger| trigger.matches(event)) {
-        notifications::info(&format!(
-            "Executing trigger for pattern '{}': {}",
-            trigger.pattern, trigger.command
-        ));
-        if let Err(err) = trigger.execute(network, contract_id, event) {
-            notifications::warn(&format!("Trigger failed: {}", err));
-        }
-    }
-
-    let persisted =
-        PersistedEvent::new(network, contract_id, event.clone(), routes, alerts.clone());
-    if let Some(store) = event_store {
-        store.persist(&persisted)?;
-    }
-    analytics.record(&persisted);
-
     Ok(())
 }
 

@@ -15,14 +15,14 @@ StarForge provides an off-chain governance layer for Soroban contract upgrades. 
 
 ### 1. Configure governance defaults (optional)
 
-```bash
+```bash norun
 starforge governance config set --timelock 86400 --threshold 2
 starforge governance config set --guardian GALICE... --emergency-quorum 2
 ```
 
 ### 2. Create a proposal
 
-```bash
+```bash norun
 starforge governance propose \
   --contract-id C... \
   --wasm target/wasm32v1-none/release/my_contract.wasm \
@@ -34,7 +34,7 @@ starforge governance propose \
 
 ### 3. Collect votes
 
-```bash
+```bash norun
 starforge governance vote --proposal-id gov-abc123 --for --wallet alice
 starforge governance vote --proposal-id gov-abc123 --for --wallet bob
 ```
@@ -43,7 +43,7 @@ When the approval threshold is met, the proposal enters a **timelock** period. E
 
 ### 4. Monitor status
 
-```bash
+```bash norun
 starforge governance list --network testnet
 starforge governance show --proposal-id gov-abc123
 starforge governance dashboard
@@ -51,7 +51,7 @@ starforge governance dashboard
 
 ### 5. Execute after timelock
 
-```bash
+```bash norun
 starforge governance execute --proposal-id gov-abc123 --wallet alice
 ```
 
@@ -61,7 +61,7 @@ StarForge validates the timelock and threshold, records the execution in the aud
 
 For critical security patches, authorized guardians can bypass the timelock:
 
-```bash
+```bash norun
 # Register guardians first
 starforge governance config set --guardian GALICE...
 starforge governance config set --guardian GBOB... --emergency-quorum 2
@@ -81,7 +81,7 @@ Emergency proposals are flagged in the audit trail and skip the timelock when th
 
 Every governance action (propose, vote, reject, execute, emergency) is recorded in `audit.json` and mirrored to the global StarForge audit log.
 
-```bash
+```bash run
 # Full governance audit log
 starforge governance audit
 

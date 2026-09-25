@@ -26,12 +26,80 @@ pub struct TutorialStatus {
     pub started_at: Option<String>,
     pub current_step: usize,
     pub completed_steps: Vec<usize>,
+    #[serde(default)]
+    pub demo_mode: bool,
+}
+
+pub const DEMO_MODE_BANNER: &str = "[DEMO MODE: NON-PRODUCTION - OFFLINE STUBS ACTIVE]";
+
+/// Check if demo/offline mode is currently active (via saved status or environment).
+pub fn is_demo_mode_active() -> bool {
+    if std::env::var("STARFORGE_DEMO_MODE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    load_status().map(|s| s.demo_mode).unwrap_or(false)
+}
+
+/// Guard against dangerous operations when operating in demo mode.
+/// Rejects mainnet transactions, live funding, or real broadcast operations.
+pub fn assert_demo_safe(operation: &str, network: Option<&str>) -> Result<()> {
+    if !is_demo_mode_active() {
+        return Ok(());
+    }
+
+    let net = network.unwrap_or("testnet").to_lowercase();
+    if net == "mainnet" || net == "pubnet" {
+        anyhow::bail!(
+            "Dangerous operation '{}' blocked in demo mode: demo mode uses offline network stubs \
+             and is strictly forbidden from touching live/mainnet networks.",
+            operation
+        );
+    }
+
+    let op_lower = operation.to_lowercase();
+    if op_lower.contains("live_fund")
+        || op_lower.contains("real_payment")
+        || op_lower.contains("mainnet")
+    {
+        anyhow::bail!(
+            "Dangerous operation '{}' blocked in demo mode: demo mode uses offline stubs \
+             and cannot execute real on-chain fund transfers.",
+            operation
+        );
+    }
+
+    Ok(())
+}
+
+/// Deterministic mock keypair for offline demo/tutorial mode (non-funded).
+pub fn mock_demo_wallet() -> (String, String) {
+    (
+        "GBDEMOTUTORIALOFFLINESTUBPUBLICKEYFORSTELLAR42".to_string(),
+        "SDEMOTUTORIALOFFLINESTUBSECRETKEYFORSTELLAR42".to_string(),
+    )
+}
+
+/// Deterministic mock simulation response JSON for offline tutorial execution.
+pub fn mock_demo_simulation_json() -> &'static str {
+    r#"{
+        "latestLedger": 100000,
+        "minResourceFee": "25000",
+        "cost": {
+            "cpuInsns": "450000",
+            "memBytes": "256000"
+        },
+        "results": [{
+            "auth": [],
+            "xdr": "AAAAAQ=="
+        }]
+    }"#
 }
 
 fn status_path() -> Result<PathBuf> {
-    let base =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Unable to resolve home directory"))?;
-    Ok(base.join(".starforge").join("tutorial_status.json"))
+    Ok(crate::utils::config::config_dir().join("tutorial_status.json"))
 }
 
 pub fn load_status() -> Result<TutorialStatus> {
@@ -121,5 +189,38 @@ mod tests {
         let rendered = render_step(&step, 0, 3);
         assert!(rendered.contains("Step 1/3"));
         assert!(rendered.contains("starforge info"));
+    }
+
+    #[test]
+    fn demo_safe_guard_blocks_mainnet_and_dangerous_ops() {
+        // Force demo mode active via env var
+        std::env::set_var("STARFORGE_DEMO_MODE", "1");
+        assert!(is_demo_mode_active());
+
+        // Safe testnet operations pass
+        assert!(assert_demo_safe("create_wallet", Some("testnet")).is_ok());
+        assert!(assert_demo_safe("simulate_contract", Some("testnet")).is_ok());
+
+        // Mainnet operations fail loudly
+        let err = assert_demo_safe("deploy_contract", Some("mainnet")).unwrap_err();
+        assert!(err.to_string().contains("blocked in demo mode"));
+        assert!(err.to_string().contains("live/mainnet"));
+
+        // Dangerous fund operations fail
+        let err2 = assert_demo_safe("live_fund_real_money", Some("testnet")).unwrap_err();
+        assert!(err2.to_string().contains("blocked in demo mode"));
+
+        std::env::remove_var("STARFORGE_DEMO_MODE");
+    }
+
+    #[test]
+    fn demo_stubs_provide_valid_mocks() {
+        let (pubkey, secret) = mock_demo_wallet();
+        assert!(pubkey.starts_with("GBDEMO"));
+        assert!(secret.starts_with("SDEMO"));
+
+        let raw = mock_demo_simulation_json();
+        let val: serde_json::Value = serde_json::from_str(raw).unwrap();
+        assert_eq!(val["minResourceFee"], "25000");
     }
 }

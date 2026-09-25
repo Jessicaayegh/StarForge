@@ -1,3 +1,4 @@
+use crate::commands::invoke_script;
 use crate::utils::hardware_wallet::HardwareWalletKind;
 use crate::utils::{bindings, call_graph, config, print as p, soroban, wallet_signer};
 use anyhow::Result;
@@ -9,6 +10,8 @@ use std::path::PathBuf;
 pub enum ContractCommands {
     /// Invoke a deployed Soroban contract function
     Invoke(InvokeArgs),
+    /// Run an ordered YAML or JSON invocation script
+    InvokeScript(invoke_script::InvokeScriptArgs),
     /// Inspect a deployed Soroban contract instance
     Inspect(InspectArgs),
     /// Upload a WASM binary to the Stellar network (upload-only step)
@@ -258,29 +261,51 @@ pub enum BindingLang {
     Go,
 }
 
-#[derive(Args)]
+/// JavaScript module layout for a generated TypeScript package.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum TsModuleArg {
+    Esm,
+    Cjs,
+    Dual,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct GenerateBindingsArgs {
-    /// Path to the compiled WASM file
+    /// Path to the compiled WASM file, or a contract spec as raw or base64 XDR
     pub wasm_file: PathBuf,
     /// Binding target language
     #[arg(long, value_enum)]
     pub lang: BindingLang,
+    /// Write a complete npm package into this directory instead of printing a
+    /// single file (TypeScript only). Only changed files are rewritten.
+    #[arg(long, value_name = "DIR")]
+    pub out_dir: Option<PathBuf>,
+    /// Module layout of the generated package (with --out-dir)
+    #[arg(long = "module", value_enum, default_value = "dual")]
+    pub module_format: TsModuleArg,
+    /// npm package name (with --out-dir; default: <wasm-stem>-client)
+    #[arg(long)]
+    pub package_name: Option<String>,
+    /// Do not write anything; fail if the package in --out-dir is out of date
+    #[arg(long, requires = "out_dir")]
+    pub check: bool,
 }
 
 pub async fn handle(cmd: ContractCommands) -> Result<()> {
     match cmd {
         ContractCommands::Invoke(args) => handle_invoke(args).await,
+        ContractCommands::InvokeScript(args) => invoke_script::handle(args).await,
         ContractCommands::Inspect(args) => handle_inspect(args).await,
         ContractCommands::Upload(args) => handle_upload(args),
-        ContractCommands::GenerateBindings(args) => handle_generate_bindings(args),
+        ContractCommands::GenerateBindings(args) => handle_generate_bindings(&args),
         ContractCommands::CallGraph(args) => handle_call_graph(args),
         ContractCommands::Deps(args) => handle_deps(args),
         ContractCommands::Version(args) => handle_version(args).await,
     }
 }
 
-fn handle_generate_bindings(args: GenerateBindingsArgs) -> Result<()> {
-    config::validate_file_path(&args.wasm_file, Some("wasm"))?;
+pub fn handle_generate_bindings(args: &GenerateBindingsArgs) -> Result<()> {
+    config::validate_file_path(&args.wasm_file, None)?;
 
     let lang = match args.lang {
         BindingLang::Rust => bindings::BindingLanguage::Rust,
@@ -288,8 +313,73 @@ fn handle_generate_bindings(args: GenerateBindingsArgs) -> Result<()> {
         BindingLang::Python => bindings::BindingLanguage::Python,
         BindingLang::Go => bindings::BindingLanguage::Go,
     };
-    let generated = bindings::generate_bindings(&args.wasm_file, lang)?;
-    println!("{}", generated);
+
+    let Some(out_dir) = &args.out_dir else {
+        let generated = bindings::generate_bindings(&args.wasm_file, lang)?;
+        println!("{}", generated);
+        return Ok(());
+    };
+
+    if lang != bindings::BindingLanguage::TypeScript {
+        anyhow::bail!("--out-dir is currently supported only with --lang ts");
+    }
+    let module = match args.module_format {
+        TsModuleArg::Esm => bindings::TsModuleFormat::Esm,
+        TsModuleArg::Cjs => bindings::TsModuleFormat::Cjs,
+        TsModuleArg::Dual => bindings::TsModuleFormat::Dual,
+    };
+    let package_name = match &args.package_name {
+        Some(name) => name.clone(),
+        None => bindings::typescript::default_package_name(
+            &args
+                .wasm_file
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        ),
+    };
+
+    let metadata = bindings::load_metadata(&args.wasm_file)?;
+    let files = bindings::generate_typescript_package(
+        &metadata,
+        &bindings::TsPackageOptions::new(package_name.clone(), module),
+    )?;
+    let report = bindings::write_generated_files(out_dir, &files, args.check)?;
+
+    let verb = if args.check { "would be " } else { "" };
+    for path in &report.created {
+        p::info(&format!("{verb}created   {path}"));
+    }
+    for path in &report.updated {
+        p::info(&format!("{verb}updated   {path}"));
+    }
+    for path in &report.removed {
+        p::info(&format!("{verb}removed   {path}"));
+    }
+
+    if args.check {
+        if !report.is_clean() {
+            anyhow::bail!(
+                "TypeScript bindings in {} are out of date; rerun without --check",
+                out_dir.display()
+            );
+        }
+        p::success(&format!(
+            "TypeScript bindings in {} are up to date",
+            out_dir.display()
+        ));
+    } else {
+        p::success(&format!(
+            "Generated {} ({} layout) in {}: {} created, {} updated, {} unchanged, {} removed",
+            package_name,
+            module.as_str(),
+            out_dir.display(),
+            report.created.len(),
+            report.updated.len(),
+            report.unchanged.len(),
+            report.removed.len()
+        ));
+    }
     Ok(())
 }
 

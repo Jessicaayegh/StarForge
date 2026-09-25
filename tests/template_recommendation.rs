@@ -44,10 +44,13 @@ fn make_entry(name: &str, tags: &[&str], downloads: u32, verified: bool) -> Temp
         maintenance: MaintenanceStatus::Active,
         license: Some("MIT".to_string()),
         repository: None,
+        repository_url: None,
         homepage: None,
         documentation: None,
+        categories: vec![],
+        featured: false,
         security_review: None,
-        changelog: vec![],
+        changelog: None,
     }
 }
 
@@ -88,7 +91,7 @@ fn skill_level_parses_all_variants() {
         ("senior", SkillLevel::Advanced),
     ] {
         assert_eq!(
-            SkillLevel::from_str(input),
+            SkillLevel::parse_lenient(input),
             Some(expected),
             "Expected '{}' to parse correctly",
             input
@@ -100,7 +103,7 @@ fn skill_level_parses_all_variants() {
 fn skill_level_rejects_unknown_strings() {
     for bad in ["", "pro", "newbie", "wizard", "123"] {
         assert_eq!(
-            SkillLevel::from_str(bad),
+            SkillLevel::parse_lenient(bad),
             None,
             "Expected '{}' to be rejected",
             bad
@@ -121,13 +124,17 @@ fn skill_level_default_is_intermediate() {
 fn explanation_contains_all_fields() {
     let rec = make_rec(
         "my-token",
-        85.5,
+        85.0,
         vec!["Verified template", "Has documentation"],
         false,
     );
     let explanation = format_explanation(&rec);
 
-    assert!(explanation.contains("85"), "Should include rounded score");
+    assert!(
+        explanation.contains("85"),
+        "Should include rounded score, got {}",
+        explanation
+    );
     assert!(explanation.contains("70"), "Should include relevance");
     assert!(explanation.contains("60"), "Should include popularity");
     assert!(explanation.contains("Good fit"), "Should include skill fit");

@@ -10,12 +10,37 @@ Complete guide for developers contributing to or extending StarForge.
 4. [Project Structure](#project-structure)
 5. [Code Style Guide](#code-style-guide)
 6. [Adding New Features](#adding-new-features)
-7. [Testing](#testing)
-8. [Documentation](#documentation)
-9. [Common Tasks](#common-tasks)
-10. [Debugging](#debugging)
-11. [Release Process](#release-process)
-12. [Database Migrations](#database-migrations)
+7. [Cargo.lock Reproducibility & Cross-Platform Lock](#cargolock-reproducibility--cross-platform-lock)
+8. [Testing](#testing)
+9. [Documentation](#documentation)
+10. [Common Tasks](#common-tasks)
+11. [Debugging](#debugging)
+12. [Release Process](#release-process)
+13. [Database Migrations](#database-migrations)
+
+---
+
+## Cargo.lock Reproducibility & Cross-Platform Lock
+
+StarForge strictly enforces `Cargo.lock` reproducibility across all supported operating systems (Linux, macOS, Windows).
+
+### Requirements & Principles
+
+1. **Deterministic Builds**: Locked builds (`cargo build --locked` / `cargo check --locked`) must resolve identical dependency versions across Linux, macOS, and Windows.
+2. **No Mutating Builds**: Running standard CI steps or local build commands must never mutate `Cargo.lock`.
+3. **Out-of-Sync Prevention**: Modifying dependencies in `Cargo.toml` without updating `Cargo.lock` via `cargo update -p <crate>` will fail CI quality checks.
+
+### Verification CLI Command
+
+Developers can verify lockfile reproducibility locally prior to committing:
+
+```bash
+# Verify lockfile reproducibility for the current directory
+starforge verify lockfile
+
+# Verify lockfile in a specific workspace path with JSON output
+starforge verify lockfile --path ./my-workspace --json
+```
 
 ---
 
@@ -114,8 +139,8 @@ loaded plugin, and a descriptive error for any that fail the check.
 
 ```bash
 # Clone repository
-git clone https://github.com/YOUR_USERNAME/starforge.git
-cd starforge
+git clone https://github.com/Nanle-code/StarForge.git
+cd StarForge
 
 # Build in debug mode
 cargo build
@@ -175,6 +200,48 @@ export STARFORGE_TELEMETRY=false
 # Use custom config directory
 export STARFORGE_CONFIG_DIR=~/.starforge-dev
 ```
+
+### Secret Redaction & Security Logging
+StarForge enforces centralized secret redaction via `crate::utils::redaction::redact_secrets`. Tracing output streams (`RUST_LOG`) and CLI error output streams automatically sanitize Stellar secret keys (`S...`), hex private keys, BIP-39 mnemonic seed phrases, auth tokens (`Bearer`, `ghp_`, `sk-`), signed XDR transaction payloads, and embedded URL credentials before output. Existing helper functions (`redact_public_key`, `redact_secret_value`, `redact_signed_xdr`) delegate to this centralized engine.
+
+### Password-Based Encryption & KDF Parameter Tuning
+
+StarForge encrypts Stellar secret keys at rest using **Argon2id** key derivation and **AES-256-GCM** authenticated encryption.
+
+#### KDF Versioning & Schema Formats
+
+- **Version 1 (`KDF_VERSION_1 = 1`)**: Argon2id + AES-256-GCM.
+- **Bundle Formats**:
+  - Legacy 3-part: `salt:nonce:ciphertext` (library defaults: 32,768 KiB memory, 3 iterations, 1 parallelism thread).
+  - 5-part: `salt:nonce:ciphertext:mem:iterations` (custom memory cost and iteration count).
+  - 6-part: `salt:nonce:ciphertext:mem:iterations:parallelism` (custom memory, iterations, and parallelism).
+  - Versioned 7-part: `v1:salt:nonce:ciphertext:mem:iterations:parallelism` (explicit version prefixing for modern tuned bundles).
+
+#### Parameter Bounds & Safety Constraints
+
+- **Memory Cost (`mem`)**: Min 8,192 KiB (8 MiB), Max 2,097,152 KiB (2 GiB).
+- **Iterations (`iterations`)**: Min 1, Max 100.
+- **Parallelism (`parallelism`)**: Min 1, Max 64 threads.
+
+#### Per-Wallet Metadata & Safe Upgrades
+
+KDF parameters are stored per wallet (`WalletEntry.kdf_options` and metadata embedded in `secret_key`). Wallet encryption parameters can be tuned or upgraded safely without data loss using:
+
+```bash
+# Tune KDF parameters for a specific wallet
+starforge wallet tune-kdf alice --mem 65536 --iterations 4 --parallelism 2
+
+# Upgrade wallet KDF to global configuration settings
+starforge wallet tune-kdf alice --use-global
+```
+
+The upgrade procedure enforces zero-data-loss safety:
+1. Validates existing password against current bundle before making any changes.
+2. Validates new KDF parameters against security bounds.
+3. Re-encrypts secret key with new parameters.
+4. Performs a verification decryption round-trip on the new bundle before persisting changes to disk and database.
+5. If any validation or decryption step fails, the original encrypted secret and metadata remain completely unchanged.
+
 
 ### Development Workflow
 
@@ -810,6 +877,30 @@ Update these files when adding features:
 - Add diagrams for complex flows
 - Update [docs/COMMAND_REFERENCE.md](docs/COMMAND_REFERENCE.md) when adding or renaming CLI subcommands
 
+### Command cheat sheet (auto-generated)
+
+[docs/COMMAND_CHEATSHEET.md](docs/COMMAND_CHEATSHEET.md) is **auto-generated from clap
+command metadata** by the crate's `build.rs`. It is committed so
+it can be linked from the README and the docs site, but you must **never edit it by hand**.
+
+**Regenerating the cheat sheet**
+
+When you add, rename, or remove a top-level subcommand, or change its one-line
+description, update the clap metadata (the `Commands` enum and `MAJOR_SUBCOMMANDS`
+table in `build.rs`) and then regenerate:
+
+```bash
+cargo build          # build.rs rewrites docs/COMMAND_CHEATSHEET.md
+git add docs/COMMAND_CHEATSHEET.md build.rs
+git commit
+```
+
+> If the committed cheat sheet is out of date, CI fails the
+> `Docs Cheat Sheet (anti-drift)` check with a `git diff --exit-code` error.
+> Note: hidden commands (`#[command(hide)]`) and internal commands listed in
+> `INTERNAL_COMMANDS` (`external`, `autocomplete`, `man`, `feature-flags`, `help`)
+> are excluded from the cheat sheet consistently.
+
 ---
 
 ## Common Tasks
@@ -1037,12 +1128,21 @@ git push origin v0.2.0
 # 3. Build release binaries
 cargo build --release
 
-# 4. Create GitHub release
+# 4. Generate release notes from git history
+python scripts/release_notes.py --version X.Y.Z --out BODY.md
+
+# 5. Create GitHub release
 # - Go to GitHub releases
 # - Create new release from tag
 # - Upload binaries
-# - Add release notes
+# - Paste the generated BODY.md as the release notes
 ```
+
+The `release.yml` workflow generates the release notes automatically on every
+`v*` tag push using [`scripts/release_notes.py`](scripts/release_notes.py).
+Commit messages should follow the [conventional-commit style](#commit-message-guidelines);
+a `!` marker (e.g. `feat!: ...`) moves the change into the "Breaking Changes"
+section, and `Closes #N` references are rendered as links in the notes.
 
 ### Release Checklist
 
@@ -1305,6 +1405,37 @@ starforge db stats
 
 ---
 
+## Configuration Schema Migrations
+
+StarForge configuration stored in `~/.starforge/config.toml` uses explicit, versioned schema migrations managed by `src/utils/config.rs`.
+
+### Architecture
+
+- `CURRENT_CONFIG_VERSION`: Constant (`"1"`) defining the latest supported schema version.
+- `run_config_migrations()`: Entry point that compares the config version with `CURRENT_CONFIG_VERSION`.
+- `ConfigMigrationError`: Custom error enum with `FromFuture`, `UnknownVersion`, `StepFailed`, and `BackupFailed` variants.
+- `MigrationReport`: Detailed report returned with `from_version`, `to_version`, `steps_applied`, and `backup_path`.
+
+### Safe Execution & Backup Policy
+
+Before any migration steps run, a timestamped backup is automatically created:
+`~/.starforge/config.backup.v<version>.<timestamp>.toml`. If backup creation fails, migration is immediately aborted to guarantee zero data loss.
+
+### Adding a New Migration Step
+
+1. Update `CURRENT_CONFIG_VERSION` in `src/utils/config.rs`.
+2. Implement `fn migrate_vN_to_vM(config: &mut Config)`.
+3. Add a new `ConfigMigrationStep` entry to `MIGRATION_STEPS` in `src/utils/config.rs`.
+4. Add integration tests in `tests/config_migrations.rs`.
+
+### Testing Config Migrations
+
+Run the integration test suite:
+
+```bash
+cargo test --test config_migrations
+```
+
 ## Contributing Guidelines
 
 ### Pull Request Process
@@ -1377,14 +1508,14 @@ Closes #123
 
 - [Stellar Discord](https://discord.gg/stellar)
 - [Rust Users Forum](https://users.rust-lang.org/)
-- [GitHub Discussions](https://github.com/YOUR_USERNAME/starforge/discussions)
+- [GitHub Discussions](https://github.com/Nanle-code/StarForge/discussions)
 
 ---
 
 ## Getting Help
 
-- **Issues**: [GitHub Issues](https://github.com/YOUR_USERNAME/starforge/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/YOUR_USERNAME/starforge/discussions)
+- **Issues**: [GitHub Issues](https://github.com/Nanle-code/StarForge/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/Nanle-code/StarForge/discussions)
 - **Discord**: Join the Stellar Discord
 - **Email**: maintainer@example.com
 

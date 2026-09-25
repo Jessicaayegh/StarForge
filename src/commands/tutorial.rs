@@ -9,7 +9,12 @@ pub enum TutorialCommands {
     /// List available tutorials
     List,
     /// Start a tutorial by slug (e.g. hello-world)
-    Start { slug: String },
+    Start {
+        slug: String,
+        /// Run tutorial in offline demo mode using local network stubs (non-production)
+        #[arg(long)]
+        demo: bool,
+    },
     /// Advance to the next tutorial step
     Next,
     /// Show current tutorial status
@@ -19,7 +24,7 @@ pub enum TutorialCommands {
 pub async fn handle(cmd: TutorialCommands) -> Result<()> {
     match cmd {
         TutorialCommands::List => list(),
-        TutorialCommands::Start { slug } => start(slug),
+        TutorialCommands::Start { slug, demo } => start(slug, demo),
         TutorialCommands::Next => next(),
         TutorialCommands::Status => status(),
     }
@@ -52,11 +57,11 @@ fn list() -> Result<()> {
         );
     }
     p::separator();
-    p::info("Start with: starforge tutorial start hello-world");
+    p::info("Start with: starforge tutorial start hello-world (or add --demo for offline mode)");
     Ok(())
 }
 
-fn start(slug: String) -> Result<()> {
+fn start(slug: String, demo: bool) -> Result<()> {
     let root = repo_root()?;
     let tutorial = tutorial_engine::load_tutorial(&root, &slug)?;
 
@@ -65,7 +70,12 @@ fn start(slug: String) -> Result<()> {
     status.started_at = Some(chrono::Utc::now().to_rfc3339());
     status.current_step = 0;
     status.completed_steps.clear();
+    status.demo_mode = demo;
     tutorial_engine::save_status(&status)?;
+
+    if demo {
+        println!("{}", tutorial_engine::DEMO_MODE_BANNER.yellow().bold());
+    }
 
     p::header(&format!("Tutorial: {}", tutorial.title));
     if let Some(desc) = &tutorial.description {
@@ -91,6 +101,9 @@ fn next() -> Result<()> {
     }
 
     if status.current_step + 1 >= tutorial.steps.len() {
+        if status.demo_mode {
+            println!("{}", tutorial_engine::DEMO_MODE_BANNER.yellow().bold());
+        }
         p::success("Tutorial complete! You reached the final milestone.");
         status.active = None;
         status.current_step = 0;
@@ -100,6 +113,10 @@ fn next() -> Result<()> {
 
     status.current_step += 1;
     tutorial_engine::save_status(&status)?;
+
+    if status.demo_mode {
+        println!("{}", tutorial_engine::DEMO_MODE_BANNER.yellow().bold());
+    }
 
     p::header(&format!("Tutorial: {}", tutorial.title));
     print_current_step(&tutorial, &status);
@@ -115,7 +132,18 @@ fn status() -> Result<()> {
     match status.active {
         Some(ref active) => {
             let tutorial = tutorial_engine::load_tutorial(&root, active)?;
+            if status.demo_mode {
+                println!("{}", tutorial_engine::DEMO_MODE_BANNER.yellow().bold());
+            }
             p::kv_accent("Active", active);
+            p::kv(
+                "Mode",
+                if status.demo_mode {
+                    "Demo (offline stubs)"
+                } else {
+                    "Standard (live network)"
+                },
+            );
             if let Some(ts) = &status.started_at {
                 p::kv("Started", ts);
             }
@@ -145,6 +173,12 @@ fn print_current_step(
     tutorial: &tutorial_engine::TutorialDefinition,
     status: &tutorial_engine::TutorialStatus,
 ) {
+    if status.demo_mode {
+        println!(
+            "  {}",
+            "[DEMO STUBS ACTIVE — NO LIVE FUNDS REQUIRED]".yellow()
+        );
+    }
     let step_index = status
         .current_step
         .min(tutorial.steps.len().saturating_sub(1));

@@ -1,7 +1,6 @@
-use crate::utils::{print as p, privacy};
+use crate::utils::{config, print as p, privacy};
 use anyhow::Result;
-use clap::{Args, Subcommand};
-use serde_json::json;
+use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum PrivacyCommands {
@@ -16,6 +15,39 @@ pub enum PrivacyCommands {
     },
     /// Generate a privacy report for the current assessment
     Report { payload: String },
+    /// Turn end-to-end strict privacy mode on or off, or show its status
+    Mode {
+        /// on | off | status
+        #[arg(value_parser = ["on", "off", "status"])]
+        action: String,
+    },
+}
+
+fn print_privacy_status() -> Result<()> {
+    let enabled = privacy::is_privacy_mode_enabled();
+    let cfg = config::load()?;
+    p::kv(
+        "Privacy mode",
+        if enabled {
+            "enabled (strict)"
+        } else {
+            "disabled"
+        },
+    );
+    p::kv(
+        "Config (privacy.mode)",
+        &cfg.privacy_mode.unwrap_or(false).to_string(),
+    );
+    let env_raw = std::env::var(privacy::PRIVACY_MODE_ENV).ok();
+    p::kv(
+        "Environment (STARFORGE_PRIVACY_MODE)",
+        env_raw.as_deref().unwrap_or("(unset)"),
+    );
+    p::info(
+        "When enabled, telemetry export, AI cloud calls, and marketplace/registry \
+         auto-updates are blocked: no bytes leave this machine.",
+    );
+    Ok(())
 }
 
 pub async fn handle(cmd: PrivacyCommands) -> Result<()> {
@@ -52,6 +84,22 @@ pub async fn handle(cmd: PrivacyCommands) -> Result<()> {
             println!("{}", report);
             p::kv("Saved To", &path);
         }
+        PrivacyCommands::Mode { action } => match action.as_str() {
+            "on" => {
+                privacy::set_privacy_mode(true)?;
+                p::success("Strict privacy mode enabled. Telemetry export, AI cloud calls and marketplace auto-update are now blocked.");
+                print_privacy_status()?;
+            }
+            "off" => {
+                privacy::set_privacy_mode(false)?;
+                p::success("Strict privacy mode disabled.");
+                print_privacy_status()?;
+            }
+            _ => {
+                p::header("Strict Privacy Mode");
+                print_privacy_status()?;
+            }
+        },
     }
     Ok(())
 }

@@ -494,7 +494,6 @@ mod tests {
             findings: vec![],
             tools_used: vec!["builtin".to_string()],
             tool_statuses: Vec::new(),
-            ci_passed: true,
             summary: AuditSummary {
                 critical: 0,
                 high: 0,
@@ -502,7 +501,7 @@ mod tests {
                 low: 0,
                 info: 0,
             },
-            ci_passed: true,
+            ci_passed: false,
         };
         let html = render_html_report(&result);
         assert!(html.contains("75.0/100"));

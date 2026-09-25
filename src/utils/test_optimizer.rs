@@ -4,9 +4,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::{Duration, Instant};
 
 // ── Core Data Structures ─────────────────────────────────────────────────────
 
@@ -171,15 +168,20 @@ pub struct FailurePatternReport {
 
 // ── Test Optimizer ──────────────────────────────────────────────────────────
 
+#[derive(Debug)]
 pub struct TestOptimizer {
-    config_dir: PathBuf,
+    pub config_dir: PathBuf,
     pub history: HashMap<String, TestHistory>,
-    cache: HashMap<String, TestCacheEntry>,
+    pub cache: HashMap<String, TestCacheEntry>,
 }
 
 impl TestOptimizer {
     pub fn new() -> Result<Self> {
         let config_dir = crate::utils::config::config_dir().join("test_optimizer");
+        Self::with_config_dir(config_dir)
+    }
+
+    pub fn with_config_dir(config_dir: PathBuf) -> Result<Self> {
         if !config_dir.exists() {
             fs::create_dir_all(&config_dir)
                 .with_context(|| format!("Failed to create {}", config_dir.display()))?;
@@ -191,6 +193,17 @@ impl TestOptimizer {
             history,
             cache,
         })
+    }
+
+    /// Construct an optimizer scoped to an explicit directory with empty
+    /// in-memory history and cache, bypassing disk I/O against the real
+    /// config directory. Intended for tests that need an isolated instance.
+    pub fn with_empty_config_dir(config_dir: PathBuf) -> Self {
+        Self {
+            config_dir,
+            history: HashMap::new(),
+            cache: HashMap::new(),
+        }
     }
 
     fn load_history(dir: &Path) -> HashMap<String, TestHistory> {
@@ -218,6 +231,15 @@ impl TestOptimizer {
     }
 
     fn save_state(&self) -> Result<()> {
+        if !self.config_dir.exists() {
+            fs::create_dir_all(&self.config_dir)
+                .with_context(|| format!("Failed to create {}", self.config_dir.display()))?;
+        }
+        // The directory is created by `new()`, but an optimizer can also be
+        // built for a directory that does not exist yet (and a user can delete
+        // it between runs), so make sure it is there before writing.
+        fs::create_dir_all(&self.config_dir)
+            .with_context(|| format!("Failed to create {}", self.config_dir.display()))?;
         let history_path = self.config_dir.join("history.json");
         fs::write(&history_path, serde_json::to_string_pretty(&self.history)?)
             .with_context(|| format!("Failed to write {}", history_path.display()))?;
@@ -311,9 +333,14 @@ impl TestOptimizer {
             TestCategory::Performance
         } else if lower.contains("prop") || lower.contains("property") || lower.contains("fuzz") {
             TestCategory::Property
-        } else if lower.contains("unit") || lower.contains("test_") {
+        } else if lower.contains("general") {
+            TestCategory::General
+        } else if lower.contains("unit") {
             TestCategory::Unit
         } else {
+            // Note: "test_" is not a Unit signal — it prefixes essentially
+            // every test name, and treating it as one leaves General
+            // unreachable.
             TestCategory::General
         }
     }
@@ -324,20 +351,23 @@ impl TestOptimizer {
     ) -> Vec<Vec<OptimizedTestCase>> {
         let mut batches: Vec<Vec<OptimizedTestCase>> = Vec::new();
 
-        let (io_bound, _other): (Vec<OptimizedTestCase>, Vec<OptimizedTestCase>) = tests
+        // Each test lands in exactly one bucket: I/O-bound first, then
+        // CPU-bound, then memory-hungry, and whatever is left is general
+        // purpose. Every test must end up in some batch.
+        let (io_bound, rest): (Vec<OptimizedTestCase>, Vec<OptimizedTestCase>) = tests
             .iter()
             .cloned()
             .partition(|t| t.resource_profile.io_intensity > 0.6);
-        let cpu_bound: Vec<OptimizedTestCase> = vec![];
-        let memory_bound: Vec<OptimizedTestCase> = vec![];
-        let general: Vec<OptimizedTestCase> = vec![];
-        let (cpu_only, general): (Vec<_>, Vec<_>) = general
+        let (cpu_only, rest): (Vec<_>, Vec<_>) = rest
             .into_iter()
             .partition(|t| t.resource_profile.cpu_intensity > 0.6);
-        let (mem_only, general): (Vec<_>, Vec<_>) = general
+        let (mem_only, general): (Vec<_>, Vec<_>) = rest
             .into_iter()
             .partition(|t| t.resource_profile.memory_mb > 256);
 
+        // Batch sizes reflect how much of the machine each kind wants:
+        // memory-hungry tests run alone, I/O-bound tests pair up, and cheap
+        // general tests pack densely.
         for chunk in io_bound.chunks(2) {
             batches.push(chunk.to_vec());
         }
@@ -419,7 +449,7 @@ impl TestOptimizer {
 
         let mut score = stability * 60.0 + transition_ratio * 40.0;
 
-        if failure_rate < 0.1 || failure_rate > 0.9 {
+        if !(0.1..=0.9).contains(&failure_rate) {
             score *= 0.3;
         }
 
@@ -643,7 +673,7 @@ impl TestOptimizer {
         let avg = total_duration as f64 / results.len() as f64;
 
         let mut sorted = results.to_vec();
-        sorted.sort_by(|a, b| a.duration_ms.cmp(&b.duration_ms));
+        sorted.sort_by_key(|a| a.duration_ms);
 
         let median = sorted[sorted.len() / 2].duration_ms as f64;
         let p95_idx = ((sorted.len() as f64 * 0.95) as usize).min(sorted.len() - 1);
@@ -780,7 +810,7 @@ impl TestOptimizer {
                 }
             })
             .collect();
-        category_summary.sort_by(|a, b| b.total_failures.cmp(&a.total_failures));
+        category_summary.sort_by_key(|a| std::cmp::Reverse(a.total_failures));
 
         let recurrence_ratio = if total_failing > 0 {
             all_failing
@@ -1162,11 +1192,8 @@ mod tests {
     use super::*;
 
     fn create_test_optimizer() -> TestOptimizer {
-        TestOptimizer {
-            config_dir: PathBuf::from("/tmp/test_optimizer"),
-            history: HashMap::new(),
-            cache: HashMap::new(),
-        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        TestOptimizer::with_config_dir(dir.keep()).unwrap()
     }
 
     #[test]

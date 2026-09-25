@@ -2,9 +2,12 @@
 name = "starforge"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.80"
 description = "A developer productivity CLI for Stellar and Soroban workflows"
 license = "MIT"
-repository = "https://github.com/YOUR_USERNAME/starforge"
+repository = "https://github.com/Nanle-code/StarForge"
+homepage = "https://github.com/Nanle-code/StarForge"
+documentation = "https://docs.rs/starforge"
 keywords = ["stellar", "soroban", "blockchain", "cli", "web3"]
 
 [[bin]]
@@ -14,7 +17,42 @@ path = "src/main.rs"
 [lib]
 name = "starforge"
 path = "src/lib.rs"
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
+
+# Built by `cargo deb` (cargo-deb) in the release workflow's `packaging` job,
+# from the already-built --release binary (`--no-build`), not by installing
+# cargo-deb's own build step — this crate's build already happens once in
+# the matching `build` job's target-specific step.
+[package.metadata.deb]
+maintainer = "StarForge maintainers <opensource@starforge.dev>"
+copyright = "2024, StarForge contributors"
+extended-description = """\
+A developer productivity CLI for Stellar and Soroban workflows: wallet \
+management, contract deployment, testing, and project scaffolding, all \
+from the terminal."""
+depends = "$auto"
+section = "devel"
+priority = "optional"
+assets = [
+    ["target/release/starforge", "usr/bin/", "755"],
+    ["man/starforge.1", "usr/share/man/man1/starforge.1", "644"],
+    ["completions/starforge.bash", "usr/share/bash-completion/completions/starforge", "644"],
+    ["completions/_starforge", "usr/share/zsh/vendor-completions/_starforge", "644"],
+    ["completions/starforge.fish", "usr/share/fish/vendor_completions.d/starforge.fish", "644"],
+    ["README.md", "usr/share/doc/starforge/README.md", "644"],
+]
+
+# Built by `cargo generate-rpm` in the same `packaging` job, also from the
+# already-built --release binary.
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/starforge", dest = "/usr/bin/starforge", mode = "755" },
+    { source = "man/starforge.1", dest = "/usr/share/man/man1/starforge.1", mode = "644", doc = true },
+    { source = "completions/starforge.bash", dest = "/usr/share/bash-completion/completions/starforge", mode = "644" },
+    { source = "completions/_starforge", dest = "/usr/share/zsh/site-functions/_starforge", mode = "644" },
+    { source = "completions/starforge.fish", dest = "/usr/share/fish/vendor_completions.d/starforge.fish", mode = "644" },
+    { source = "README.md", dest = "/usr/share/doc/starforge/README.md", mode = "644", doc = true },
+]
 
 # Package-wide lint policy. These lints are intentionally relaxed for the crate
 # (including integration tests, which use lightweight mock structs and helpers).
@@ -23,6 +61,8 @@ crate-type = ["cdylib", "rlib"]
 dead_code = "allow"
 unused_imports = "allow"
 unused_variables = "allow"
+noop_method_call = "allow"
+deprecated = "allow"
 
 [lints.clippy]
 needless_range_loop = "allow"
@@ -38,21 +78,24 @@ doc_overindented_list_items = "allow"
 expect_fun_call = "allow"
 useless_vec = "allow"
 single_match = "allow"
+await_holding_lock = "allow"
 
 [dependencies]
 clap     = { version = "=4.4.18", features = ["derive", "color"] }
 serde    = { version = "1.0",     features = ["derive"] }
 serde_json = "1.0"
+regex    = "1.10"
 toml     = "=0.8.8"
 semver   = "1.0"
 colored  = "=2.1.0"
-comfy-table  = "7.1.1"
+comfy-table  = "=8.0.0"
 dirs     = "=5.0.1"
 anyhow   = "1.0"
+thiserror = "1.0"
 chrono   = { version = "0.4", features = ["serde"] }
 rand     = "0.8"
 ed25519-dalek = ">=2.1.1, <3"
-reqwest    = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
+reqwest    = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 tokio      = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 futures-util = "0.3"
@@ -61,17 +104,19 @@ clap_complete  = "=4.4.10"
 dialoguer  = { version = "0.11", features = ["fuzzy-select", "password"] }
 aes-gcm = "0.10.3"
 argon2 = "0.5.3"
-stellar-strkey = "=0.0.9"
+stellar-strkey = "=0.0.10"
 stellar-xdr = { version = "22.0.0", features = ["serde"] }
 base64     = "0.21"
 urlencoding = "2.1"
 sha2 = "0.10"
 indicatif = "0.17.7"
 libloading = "0.8.1"
+wasmtime = { version = "24.0.7", default-features = false, features = ["cranelift", "runtime", "wat"] }
 uuid = { version = "1.6.1", features = ["v4", "serde"] }
 hidapi = { version = "2.6.5", optional = true }
 trezor-client = { version = "0.1.5", default-features = false, features = ["stellar"], optional = true }
-zxcvbn = "=3.1.0"
+zxcvbn = "=3.1.1"
+zeroize = { version = "1", features = ["derive"] }
 hex = "0.4"
 once_cell = "1"
 tracing = "0.1"
@@ -79,11 +124,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"]
 tracing-appender = "0.2"
 bip39 = { version = "2", features = ["rand", "std"] }
 hmac = "0.12"
-rustyline = "14.0.0"
+rustyline = "13.0"
 zip = "0.6"
 tempfile = "3.8"
 wasm-bindgen = "0.2"
 rusqlite = { version = "0.32", features = ["bundled"] }
+libc = "0.2"
 csv = "1.0"
 minijinja = "1.0"
 serde_yaml = "0.9.34"
@@ -91,7 +137,9 @@ async-trait = "0.1"
 futures = "0.3.33"
 
 [features]
+ai = []
 hardware-wallet = ["dep:hidapi", "dep:trezor-client"]
+unsafe-native-plugins = []
 memory-profiling = []
 
 [dev-dependencies]
@@ -120,3 +168,4 @@ lto = true
 [build-dependencies]
 clap = { version = "4.4.18", features = ["derive"] }
 clap_complete = "4.4.10"
+clap_mangen = "=0.2.21"

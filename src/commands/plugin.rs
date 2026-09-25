@@ -146,21 +146,71 @@ fn install(name: String, path: Option<PathBuf>, source: Option<String>, force: b
 
     let plugin_manifest = manifest::require_compatible_manifest(&lib_path, &name)?;
 
+    // Verify publisher signature and trust metadata
+    let ver_res =
+        crate::plugins::verifier::verify_plugin_signature(&lib_path, &plugin_manifest, &config);
+    match ver_res.status {
+        crate::plugins::verifier::VerificationStatus::InvalidSignature
+        | crate::plugins::verifier::VerificationStatus::MalformedKey
+        | crate::plugins::verifier::VerificationStatus::MalformedSignature => {
+            if !force {
+                p::header("Plugin Install — Verification Failure");
+                p::error(&format!(
+                    "Signature verification failed: {}",
+                    ver_res.detail.as_deref().unwrap_or("")
+                ));
+                anyhow::bail!("Refusing to install plugin with invalid signature without --force");
+            } else {
+                p::warn("Installing plugin with invalid signature because --force was specified");
+            }
+        }
+        crate::plugins::verifier::VerificationStatus::UntrustedPublisher => {
+            if !force {
+                p::header("Plugin Install — Untrusted Publisher");
+                p::warn(&format!(
+                    "Publisher key '{}' is not in the trusted publishers list.",
+                    ver_res.publisher_key.as_deref().unwrap_or("")
+                ));
+                anyhow::bail!(
+                    "Refusing to install plugin from untrusted publisher without --force"
+                );
+            } else {
+                p::warn("Installing plugin from untrusted publisher because --force was specified");
+            }
+        }
+        crate::plugins::verifier::VerificationStatus::Unsigned
+            if config.plugin_trust.require_signatures && !force =>
+        {
+            anyhow::bail!(
+                "CLI configuration requires signed plugins, but plugin is unsigned. Refusing without --force"
+            );
+        }
+        _ => {}
+    }
+
     // Load the plugin to discover the commands it registers.
-    let discovered_commands: Vec<RegisteredCommand> = {
+    let (discovered_commands, discovered_description): (Vec<RegisteredCommand>, String) = {
         let mut pm = PluginManager::new();
         unsafe {
             pm.load_plugin(&lib_path).with_context(|| {
                 format!("Failed to load plugin '{}' to discover commands", name)
             })?;
         }
-        pm.list_commands()
+        let commands = pm
+            .list_commands()
             .into_iter()
             .map(|c| RegisteredCommand {
                 name: c.name,
                 description: c.description,
             })
-            .collect()
+            .collect();
+        let description = pm
+            .list_plugins()
+            .into_iter()
+            .map(|(_, desc, _)| desc.to_string())
+            .find(|d| !d.is_empty())
+            .unwrap_or_default();
+        (commands, description)
     };
 
     registry::install_plugin(
@@ -169,8 +219,11 @@ fn install(name: String, path: Option<PathBuf>, source: Option<String>, force: b
         source_str,
         &plugin_manifest.starforge_version,
         &plugin_manifest.version,
-        "",
+        &discovered_description,
         discovered_commands.clone(),
+        plugin_manifest.publisher.clone(),
+        plugin_manifest.publisher_key.clone(),
+        ver_res.status.clone(),
     )?;
 
     p::header("Plugin Install");
@@ -183,6 +236,13 @@ fn install(name: String, path: Option<PathBuf>, source: Option<String>, force: b
         &plugin_manifest.starforge_version,
     );
     p::kv("Trust", trust.label());
+    p::kv("Verification", ver_res.status.label());
+    if let Some(ref pub_name) = plugin_manifest.publisher {
+        p::kv("Publisher", pub_name);
+    }
+    if let Some(ref pub_key) = plugin_manifest.publisher_key {
+        p::kv("Publisher key", pub_key);
+    }
     if !source_str.is_empty() {
         p::kv("Source", source_str);
     }
@@ -273,6 +333,7 @@ fn list(json: bool) -> Result<()> {
             version: String,
             trust: String,
             source: String,
+            description: String,
             commands: Vec<PluginCommandSummary>,
         }
 
@@ -282,20 +343,20 @@ fn list(json: bool) -> Result<()> {
             description: String,
         }
 
-        let plugins: Vec<PluginSummary> = reg
-            .plugins
-            .iter()
+        let plugins: Vec<PluginSummary> = crate::plugins::registry::plugin_list_entries(&reg)
+            .into_iter()
             .map(|entry| PluginSummary {
-                name: entry.name.clone(),
-                version: entry.plugin_version.clone(),
+                name: entry.name,
+                version: entry.plugin_version,
                 trust: entry.trust.label().to_string(),
-                source: entry.source.clone(),
+                source: entry.source,
+                description: entry.description,
                 commands: entry
                     .commands
-                    .iter()
+                    .into_iter()
                     .map(|cmd| PluginCommandSummary {
-                        name: cmd.name.clone(),
-                        description: cmd.description.clone(),
+                        name: cmd.name,
+                        description: cmd.description,
                     })
                     .collect(),
             })
@@ -315,22 +376,30 @@ fn list(json: bool) -> Result<()> {
 
     p::kv("StarForge core version", CORE_VERSION);
     p::separator();
+    let list_entries = crate::plugins::registry::plugin_list_entries(&reg);
 
-    let entries = reg.plugins.clone();
-
-    let plugin_rows: Vec<Vec<String>> = entries
+    let plugin_rows: Vec<Vec<String>> = list_entries
         .iter()
         .map(|entry| {
             vec![
                 entry.name.clone(),
                 entry.plugin_version.clone(),
                 entry.trust.label().to_string(),
-                "".to_string(),
+                reg.plugins
+                    .iter()
+                    .find(|p| p.name == entry.name)
+                    .map(|p| p.verification_status.label().to_string())
+                    .unwrap_or_default(),
+                entry.description.clone(),
             ]
         })
         .collect();
-    p::table(&["Name", "Version", "Trust", "Description"], &plugin_rows);
+    p::table(
+        &["Name", "Version", "Trust", "Verification", "Description"],
+        &plugin_rows,
+    );
 
+    let entries = reg.plugins.clone();
     let command_rows: Vec<Vec<String>> = entries
         .iter()
         .flat_map(|entry| {
@@ -486,6 +555,9 @@ fn uninstall(name: String, purge: bool, yes: bool) -> Result<()> {
     Ok(())
 }
 
+// Not currently called from any code path in this crate. Kept rather than
+// removed since deleting it is a product decision, not a lint-scoping one.
+#[allow(dead_code)]
 fn discover_commands_from_library(lib_path: &str) -> Result<Vec<RegisteredCommand>> {
     let path = Path::new(lib_path);
     let mut pm = PluginManager::new();
@@ -516,7 +588,7 @@ fn update(name: Option<String>, yes: bool) -> Result<()> {
         return Ok(());
     }
 
-    let config = config::load().unwrap_or_default();
+    let _config = config::load().unwrap_or_default();
 
     let to_update: Vec<_> = match &name {
         Some(n) => {
@@ -605,8 +677,11 @@ fn update(name: Option<String>, yes: bool) -> Result<()> {
                         &pl.source,
                         &pl.starforge_version,
                         &pl.plugin_version,
-                        "",
+                        &pl.description,
                         pl.commands.clone(),
+                        pl.publisher.clone(),
+                        pl.publisher_key.clone(),
+                        pl.verification_status.clone(),
                     )?;
                     p::success(&format!("  '{}' updated via cargo install", pl.name));
                     updated += 1;
@@ -646,16 +721,19 @@ fn update(name: Option<String>, yes: bool) -> Result<()> {
 
                     if modified > installed_epoch {
                         // Library on disk is newer — refresh the registry entry.
-                        let (cmds, _description) = discover_plugin_metadata(&pl.path)
-                            .unwrap_or_else(|_| (pl.commands.clone(), "".to_string()));
+                        let (cmds, description) = discover_plugin_metadata(&pl.path)
+                            .unwrap_or_else(|_| (pl.commands.clone(), String::new()));
                         registry::install_plugin(
                             &pl.name,
                             std::path::Path::new(&pl.path),
                             &pl.source,
                             &pl.starforge_version,
                             &pl.plugin_version,
-                            "",
+                            &description,
                             cmds,
+                            pl.publisher.clone(),
+                            pl.publisher_key.clone(),
+                            pl.verification_status.clone(),
                         )?;
                         p::success(&format!(
                             "  '{}' library on disk is newer — registry refreshed.",
@@ -738,7 +816,28 @@ fn verify(name: Option<String>, deep: bool, runtime_check: bool) -> Result<()> {
             crate::plugins::interface::is_core_version_compatible(&pl.starforge_version)
         };
 
-        let status = if lib_exists && trust_ok && compat_ok {
+        let ver_res = manifest::load_manifest_for_library(std::path::Path::new(&pl.path))
+            .ok()
+            .flatten()
+            .map(|mf| {
+                crate::plugins::verifier::verify_plugin_signature(
+                    std::path::Path::new(&pl.path),
+                    &mf,
+                    &config,
+                )
+            });
+
+        let ver_status = ver_res
+            .as_ref()
+            .map(|r| r.status.clone())
+            .unwrap_or(pl.verification_status.clone());
+        let ver_ok = matches!(
+            ver_status,
+            crate::plugins::verifier::VerificationStatus::Verified
+                | crate::plugins::verifier::VerificationStatus::Unsigned
+        );
+
+        let status = if lib_exists && trust_ok && compat_ok && ver_ok {
             "✓ OK"
         } else if !lib_exists {
             all_ok = false;
@@ -746,22 +845,29 @@ fn verify(name: Option<String>, deep: bool, runtime_check: bool) -> Result<()> {
         } else if !compat_ok {
             all_ok = false;
             "✗ incompatible"
+        } else if !ver_ok {
+            all_ok = false;
+            "✗ signature invalid"
         } else {
             all_ok = false;
             "⚠ untrusted source"
         };
 
         println!(
-            "  {:<24} [{}]  trust={}",
+            "  {:<24} [{}]  trust={}  verification={}",
             pl.name,
             status,
-            current_trust.label()
+            current_trust.label(),
+            ver_status.label(),
         );
         if !pl.starforge_version.is_empty() {
             p::kv("StarForge", &pl.starforge_version);
         }
         if !pl.source.is_empty() {
             p::kv("Source", &pl.source);
+        }
+        if let Some(ref publisher) = pl.publisher {
+            p::kv("Publisher", publisher);
         }
         if !lib_exists {
             p::warn(&format!("Library not found at: {}", pl.path));
@@ -777,6 +883,16 @@ fn verify(name: Option<String>, deep: bool, runtime_check: bool) -> Result<()> {
                 pl.starforge_version, CORE_VERSION
             ));
             p::info("Reinstall a compatible build or upgrade StarForge.");
+        }
+        if !ver_ok {
+            p::warn(&format!(
+                "Verification status is {}: {}",
+                ver_status.label(),
+                ver_res
+                    .as_ref()
+                    .and_then(|r| r.detail.clone())
+                    .unwrap_or_default()
+            ));
         }
     }
 
@@ -993,6 +1109,84 @@ fn audit_plugin(plugin: &registry::InstalledPlugin, runtime_check: bool) -> Audi
                     severity: AuditSeverity::Fail,
                     message: err.to_string(),
                 }),
+            }
+
+            let config = config::load().unwrap_or_default();
+            let ver_res = crate::plugins::verifier::verify_plugin_signature(
+                library_path,
+                &plugin_manifest,
+                &config,
+            );
+            match ver_res.status {
+                crate::plugins::verifier::VerificationStatus::Verified => {
+                    checks.push(AuditCheck {
+                        name: "signature",
+                        severity: AuditSeverity::Pass,
+                        message: format!(
+                            "Ed25519 signature verified (publisher: {})",
+                            ver_res.publisher.as_deref().unwrap_or("unknown")
+                        ),
+                    });
+                }
+                crate::plugins::verifier::VerificationStatus::Unsigned => {
+                    checks.push(AuditCheck {
+                        name: "signature",
+                        severity: if config.plugin_trust.require_signatures {
+                            AuditSeverity::Fail
+                        } else {
+                            AuditSeverity::Pass
+                        },
+                        message: "Plugin is unsigned".into(),
+                    });
+                }
+                crate::plugins::verifier::VerificationStatus::UntrustedPublisher => {
+                    checks.push(AuditCheck {
+                        name: "signature",
+                        severity: AuditSeverity::Warn,
+                        message: format!(
+                            "Publisher key '{}' is untrusted",
+                            ver_res.publisher_key.as_deref().unwrap_or("")
+                        ),
+                    });
+                }
+                crate::plugins::verifier::VerificationStatus::InvalidSignature => {
+                    checks.push(AuditCheck {
+                        name: "signature",
+                        severity: AuditSeverity::Fail,
+                        message: "Cryptographic signature mismatch (tampered library or wrong key)"
+                            .into(),
+                    });
+                }
+                crate::plugins::verifier::VerificationStatus::MalformedKey => {
+                    checks.push(AuditCheck {
+                        name: "signature",
+                        severity: AuditSeverity::Fail,
+                        message: format!(
+                            "Malformed publisher key: {}",
+                            ver_res.detail.as_deref().unwrap_or("")
+                        ),
+                    });
+                }
+                crate::plugins::verifier::VerificationStatus::MalformedSignature => {
+                    checks.push(AuditCheck {
+                        name: "signature",
+                        severity: AuditSeverity::Fail,
+                        message: format!(
+                            "Malformed signature string: {}",
+                            ver_res.detail.as_deref().unwrap_or("")
+                        ),
+                    });
+                }
+                crate::plugins::verifier::VerificationStatus::Failed => {
+                    checks.push(AuditCheck {
+                        name: "signature",
+                        severity: AuditSeverity::Fail,
+                        message: format!(
+                            "Verification failed: {}",
+                            ver_res.detail.as_deref().unwrap_or("")
+                        ),
+                    });
+                }
             }
         }
         Ok(None) => checks.push(AuditCheck {

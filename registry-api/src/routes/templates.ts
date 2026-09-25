@@ -4,12 +4,15 @@ import { TemplateStore, ITemplate } from "../models/Template";
 import { searchAnalytics } from "../models/SearchAnalytics";
 import { searchEngine, SearchOptions } from "../services/searchEngine";
 import { verifyToken, optionalAuth } from "../middleware/auth";
+import { mutationRateLimiter } from "../middleware/rateLimiter";
+import { ownershipHistoryStore } from "../models/OwnershipHistory";
+import { userStore } from "../models/User";
 import logger from "../utils/logger";
 import fs from "fs";
 import path from "path";
 
 const router = express.Router();
-const templateStore = new TemplateStore();
+export const templateStore = new TemplateStore();
 
 const STORAGE_DIR = process.env.STORAGE_DIR || "./storage/templates";
 
@@ -32,6 +35,7 @@ function serializeTemplate(tpl: ITemplate) {
     repository: tpl.repository,
     homepage: tpl.homepage,
     documentation: tpl.documentation,
+    readme: tpl.readme || tpl.documentation || "",
     downloads: tpl.downloads,
     verified: tpl.verified,
     created_at: tpl.createdAt,
@@ -377,7 +381,165 @@ router.get(
   },
 );
 
+// Get template ownership history
+router.get(
+  "/:name/ownership-history",
+  optionalAuth,
+  async (req: Request, res: Response) => {
+    try {
+      const { name } = req.params;
+      const history = await ownershipHistoryStore.getHistoryForTemplate(name);
+      res.json({
+        success: true,
+        template_name: name,
+        history,
+      });
+    } catch (err) {
+      logger.error("Ownership history error", err);
+      res.status(500).json({ error: "Failed to fetch ownership history" });
+    }
+  },
+);
+
+// Public publisher profile used by the registry portal.
+router.get(
+  "/publishers/:publisher",
+  optionalAuth,
+  async (req: Request, res: Response) => {
+    try {
+      const publisher = decodeURIComponent(req.params.publisher).toLowerCase();
+      const templates = (await templateStore.all()).filter(
+        (tpl) => tpl.author.toLowerCase() === publisher || tpl.publisherId.toLowerCase() === publisher,
+      );
+      if (templates.length === 0) {
+        return res.status(404).json({ error: "Publisher not found" });
+      }
+      const latestByName = new Map<string, ITemplate>();
+      for (const template of templates) {
+        const current = latestByName.get(template.name);
+        if (!current || new Date(template.createdAt) > new Date(current.createdAt)) {
+          latestByName.set(template.name, template);
+        }
+      }
+      res.json({
+        success: true,
+        publisher: templates[0].author,
+        template_count: latestByName.size,
+        total_downloads: templates.reduce((sum, tpl) => sum + tpl.downloads, 0),
+        templates: [...latestByName.values()].map(serializeTemplate),
+      });
+    } catch (err) {
+      logger.error("Publisher profile error", err);
+      res.status(500).json({ error: "Failed to fetch publisher profile" });
+    }
+  },
+);
+
+// Transfer template ownership
+router.post(
+  "/:name/transfer-ownership",
+  verifyToken,
+  mutationRateLimiter,
+  async (req: Request, res: Response) => {
+    try {
+      const { name } = req.params;
+      const { new_publisher_id, new_username } = req.body;
+
+      if (!new_publisher_id && !new_username) {
+        return res.status(400).json({
+          error: "Missing new_publisher_id or new_username in request body",
+        });
+      }
+
+      if (!req.userId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      const templates = await templateStore.findByName(name);
+      if (templates.length === 0) {
+        return res.status(404).json({ error: "Template not found" });
+      }
+
+      const currentOwnerId = await templateStore.findPublisherForName(name);
+      if (currentOwnerId !== req.userId) {
+        return res.status(403).json({
+          error: "Forbidden: only the template owner can transfer ownership",
+        });
+      }
+
+      let targetUser = null;
+      if (new_publisher_id) {
+        targetUser = await userStore.findById(new_publisher_id);
+      } else if (new_username) {
+        targetUser = await userStore.findByUsername(new_username);
+      }
+
+      if (!targetUser) {
+        return res.status(404).json({ error: "Target publisher not found" });
+      }
+
+      await templateStore.updatePublisherForName(name, targetUser.id);
+      const currentUser = await userStore.findById(req.userId);
+
+      await ownershipHistoryStore.record({
+        templateId: templates[0].id,
+        templateName: name,
+        version: templates[0].version,
+        publisherId: targetUser.id,
+        publisherUsername: targetUser.username,
+        previousPublisherId: req.userId,
+        action: "TRANSFER_OWNERSHIP",
+        ipAddress: req.ip,
+        metadata: {
+          transferred_by: currentUser?.username || req.userId,
+        },
+      });
+
+      logger.info(
+        `Ownership of ${name} transferred from ${req.userId} to ${targetUser.id}`,
+      );
+
+      res.json({
+        success: true,
+        message: `Ownership of ${name} successfully transferred to ${targetUser.username}`,
+        new_publisher_id: targetUser.id,
+      });
+    } catch (err) {
+      logger.error("Transfer ownership error", err);
+      res.status(500).json({ error: "Transfer ownership failed" });
+    }
+  },
+);
+
 // Get template by name and version
+router.get(
+  "/:name",
+  optionalAuth,
+  async (req: Request, res: Response) => {
+    try {
+      const versions = await templateStore.findByName(req.params.name);
+      if (versions.length === 0) {
+        return res.status(404).json({ error: "Template not found" });
+      }
+      const latest = versions[0];
+      searchAnalytics.recordInteraction(req.userId, latest.id, "view");
+      res.json({
+        success: true,
+        template: serializeTemplate(latest),
+        versions: versions.map((version) => ({
+          version: version.version,
+          created_at: version.createdAt,
+          downloads: version.downloads,
+          download_url: version.downloadUrl,
+        })),
+      });
+    } catch (err) {
+      logger.error("Template versions error", err);
+      res.status(500).json({ error: "Failed to fetch template versions" });
+    }
+  },
+);
+
 router.get(
   "/:name/:version",
   optionalAuth,
@@ -407,7 +569,7 @@ router.get(
 );
 
 // Publish template
-router.post("/publish", verifyToken, async (req: Request, res: Response) => {
+router.post("/publish", verifyToken, mutationRateLimiter, async (req: Request, res: Response) => {
   try {
     const {
       name,
@@ -420,6 +582,7 @@ router.post("/publish", verifyToken, async (req: Request, res: Response) => {
       repository,
       homepage,
       documentation,
+      readme,
       content,
     } = req.body;
 
@@ -427,9 +590,23 @@ router.post("/publish", verifyToken, async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
-    // Check if template already exists
+    if (!req.userId) {
+      return res.status(401).json({ error: "Unauthorized publisher" });
+    }
+
+    const publisher = await userStore.findById(req.userId);
+
+    // Check ownership of template name across publishers
+    const existingOwnerId = await templateStore.findPublisherForName(name);
+    if (existingOwnerId && existingOwnerId !== req.userId) {
+      return res
+        .status(403)
+        .json({ error: "Forbidden: template name owned by another publisher" });
+    }
+
+    // Check if exact version already exists
     const existing = await templateStore.findByNameAndVersion(name, version);
-    if (existing && existing.publisherId === req.userId) {
+    if (existing) {
       return res
         .status(409)
         .json({ error: "Template version already published" });
@@ -455,9 +632,10 @@ router.post("/publish", verifyToken, async (req: Request, res: Response) => {
       repository,
       homepage,
       documentation,
+      readme,
       downloads: 0,
       verified: false,
-      publisherId: req.userId!,
+      publisherId: req.userId,
       createdAt: new Date(),
       updatedAt: new Date(),
       ratings: { average: 0, count: 0, distribution: {} },
@@ -465,6 +643,23 @@ router.post("/publish", verifyToken, async (req: Request, res: Response) => {
     };
 
     await templateStore.create(template);
+
+    // Record auditable ownership event
+    await ownershipHistoryStore.record({
+      templateId,
+      templateName: name,
+      version,
+      publisherId: req.userId,
+      publisherUsername: publisher?.username || author,
+      action: "PUBLISH",
+      ipAddress: req.ip,
+      metadata: {
+        license,
+        tags: tags || [],
+        repository,
+      },
+    });
+
     logger.info(`Template published: ${name}@${version}`);
 
     res.status(201).json({
@@ -478,6 +673,10 @@ router.post("/publish", verifyToken, async (req: Request, res: Response) => {
     res.status(500).json({ error: "Publish failed" });
   }
 });
+
+
+
+
 
 // Download template
 router.get(

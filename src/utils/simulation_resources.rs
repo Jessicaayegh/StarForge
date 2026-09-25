@@ -78,6 +78,16 @@ pub enum SimulationResourceError {
     FeeOverflow,
     /// Input exceeded [`MAX_RESPONSE_BYTES`].
     ResponseTooLarge { bytes: usize, limit: usize },
+    /// An unknown simulation profile name was requested.
+    UnknownProfile {
+        name: String,
+        available: Vec<String>,
+    },
+    /// Simulation exceeded the resource ceilings asserted by the active profile.
+    ProfileCeilingExceeded {
+        profile: String,
+        violations: Vec<ProfileViolation>,
+    },
 }
 
 impl std::fmt::Display for SimulationResourceError {
@@ -110,6 +120,28 @@ impl std::fmt::Display for SimulationResourceError {
                 "simulation response is {} bytes, above the {} byte limit",
                 bytes, limit
             ),
+            Self::UnknownProfile { name, available } => write!(
+                f,
+                "unknown simulation profile '{}'; available profiles: {}",
+                name,
+                available.join(", ")
+            ),
+            Self::ProfileCeilingExceeded {
+                profile,
+                violations,
+            } => {
+                write!(
+                    f,
+                    "simulation exceeded profile '{}' ceilings ({} violation(s)): {}",
+                    profile,
+                    violations.len(),
+                    violations
+                        .iter()
+                        .map(|v| v.message.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
+            }
         }
     }
 }
@@ -204,6 +236,187 @@ impl ResourceFeePlan {
     pub fn recommended_fee_xlm(&self) -> f64 {
         self.recommended_fee_stroops as f64 / STROOPS_PER_XLM
     }
+}
+
+/// A deterministic simulation profile defining resource ceilings and defaults.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SimulationProfile {
+    /// Name identifier for the profile (e.g. `ci-smoke`, `ci-full`, `dev-fast`).
+    pub name: String,
+    /// Human description of the profile scope.
+    pub description: String,
+    /// Maximum allowed CPU instructions burned.
+    pub max_cpu_instructions: u64,
+    /// Maximum allowed linear memory in bytes.
+    pub max_memory_bytes: u64,
+    /// Maximum allowed ledger read bytes.
+    pub max_read_bytes: u64,
+    /// Maximum allowed ledger write bytes.
+    pub max_write_bytes: u64,
+    /// Maximum allowed total footprint entries (read-only + read-write).
+    pub max_total_entries: usize,
+    /// Maximum allowed recommended fee in stroops.
+    pub max_fee_stroops: u64,
+    /// Default safety margin percent applied in this profile.
+    pub default_margin_percent: u32,
+}
+
+/// A specific resource ceiling breach when evaluating against a profile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileViolation {
+    pub metric: String,
+    pub actual: u64,
+    pub ceiling: u64,
+    pub message: String,
+}
+
+/// Return all built-in deterministic simulation profiles.
+pub fn built_in_profiles() -> Vec<SimulationProfile> {
+    vec![
+        SimulationProfile {
+            name: "ci-smoke".to_string(),
+            description: "Strict tight resource limits for fast CI sanity checks".to_string(),
+            max_cpu_instructions: 2_000_000,
+            max_memory_bytes: 2_097_152, // 2 MB
+            max_read_bytes: 32_768,      // 32 KB
+            max_write_bytes: 8_192,      // 8 KB
+            max_total_entries: 10,
+            max_fee_stroops: 100_000,
+            default_margin_percent: 20,
+        },
+        SimulationProfile {
+            name: "ci-full".to_string(),
+            description: "Standard production-grade ceilings for full CI test pipelines"
+                .to_string(),
+            max_cpu_instructions: 100_000_000,
+            max_memory_bytes: 41_943_040, // 40 MB
+            max_read_bytes: 200_000,
+            max_write_bytes: 100_000,
+            max_total_entries: 100,
+            max_fee_stroops: 10_000_000,
+            default_margin_percent: 20,
+        },
+        SimulationProfile {
+            name: "dev-fast".to_string(),
+            description: "Relaxed developer iteration limits with lower margin for rapid loops"
+                .to_string(),
+            max_cpu_instructions: 50_000_000,
+            max_memory_bytes: 20_971_520, // 20 MB
+            max_read_bytes: 100_000,
+            max_write_bytes: 50_000,
+            max_total_entries: 50,
+            max_fee_stroops: 5_000_000,
+            default_margin_percent: 10,
+        },
+    ]
+}
+
+/// Retrieve a simulation profile by name, failing loudly if not found.
+pub fn get_profile(name: &str) -> Result<SimulationProfile> {
+    let profiles = built_in_profiles();
+    for p in &profiles {
+        if p.name.eq_ignore_ascii_case(name) {
+            return Ok(p.clone());
+        }
+    }
+
+    let available = profiles.into_iter().map(|p| p.name).collect();
+    Err(SimulationResourceError::UnknownProfile {
+        name: name.to_string(),
+        available,
+    })
+}
+
+/// Validate simulation resources and fee plan against a profile's resource ceilings.
+pub fn validate_against_profile(
+    resources: &SimulationResources,
+    plan: &ResourceFeePlan,
+    profile: &SimulationProfile,
+) -> Vec<ProfileViolation> {
+    let mut violations = Vec::new();
+
+    if let Some(cpu) = resources.cpu_instructions {
+        if cpu > profile.max_cpu_instructions {
+            violations.push(ProfileViolation {
+                metric: "cpu_instructions".to_string(),
+                actual: cpu,
+                ceiling: profile.max_cpu_instructions,
+                message: format!(
+                    "CPU instructions {} exceeded profile ceiling of {}",
+                    cpu, profile.max_cpu_instructions
+                ),
+            });
+        }
+    }
+
+    if let Some(mem) = resources.memory_bytes {
+        if mem > profile.max_memory_bytes {
+            violations.push(ProfileViolation {
+                metric: "memory_bytes".to_string(),
+                actual: mem,
+                ceiling: profile.max_memory_bytes,
+                message: format!(
+                    "Memory bytes {} exceeded profile ceiling of {}",
+                    mem, profile.max_memory_bytes
+                ),
+            });
+        }
+    }
+
+    if let Some(fp) = &resources.footprint {
+        let total_entries = fp.total_entries() as u64;
+        if total_entries > profile.max_total_entries as u64 {
+            violations.push(ProfileViolation {
+                metric: "footprint_entries".to_string(),
+                actual: total_entries,
+                ceiling: profile.max_total_entries as u64,
+                message: format!(
+                    "Footprint total entries {} exceeded profile ceiling of {}",
+                    total_entries, profile.max_total_entries
+                ),
+            });
+        }
+
+        let read_bytes = u64::from(fp.read_bytes);
+        if read_bytes > profile.max_read_bytes {
+            violations.push(ProfileViolation {
+                metric: "read_bytes".to_string(),
+                actual: read_bytes,
+                ceiling: profile.max_read_bytes,
+                message: format!(
+                    "Ledger read bytes {} exceeded profile ceiling of {}",
+                    read_bytes, profile.max_read_bytes
+                ),
+            });
+        }
+
+        let write_bytes = u64::from(fp.write_bytes);
+        if write_bytes > profile.max_write_bytes {
+            violations.push(ProfileViolation {
+                metric: "write_bytes".to_string(),
+                actual: write_bytes,
+                ceiling: profile.max_write_bytes,
+                message: format!(
+                    "Ledger write bytes {} exceeded profile ceiling of {}",
+                    write_bytes, profile.max_write_bytes
+                ),
+            });
+        }
+    }
+
+    if plan.recommended_fee_stroops > profile.max_fee_stroops {
+        violations.push(ProfileViolation {
+            metric: "recommended_fee_stroops".to_string(),
+            actual: plan.recommended_fee_stroops,
+            ceiling: profile.max_fee_stroops,
+            message: format!(
+                "Recommended fee {} stroops exceeded profile ceiling of {} stroops",
+                plan.recommended_fee_stroops, profile.max_fee_stroops
+            ),
+        });
+    }
+
+    violations
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -572,6 +785,83 @@ pub fn render_report(resources: &SimulationResources, plan: &ResourceFeePlan) {
     for warning in &resources.warnings {
         p::warn(warning);
     }
+}
+
+/// Render profile evaluation results and violations.
+pub fn render_profile_report(profile: &SimulationProfile, violations: &[ProfileViolation]) {
+    use crate::utils::print as p;
+
+    p::header(&format!("Simulation Profile: {}", profile.name));
+    p::separator();
+    p::kv("Description", &profile.description);
+    p::kv("Max CPU", &format_thousands(profile.max_cpu_instructions));
+    p::kv(
+        "Max Memory",
+        &format!("{} bytes", format_thousands(profile.max_memory_bytes)),
+    );
+    p::kv(
+        "Max Read Bytes",
+        &format!("{} bytes", format_thousands(profile.max_read_bytes)),
+    );
+    p::kv(
+        "Max Write Bytes",
+        &format!("{} bytes", format_thousands(profile.max_write_bytes)),
+    );
+    p::kv(
+        "Max Footprint Entries",
+        &profile.max_total_entries.to_string(),
+    );
+    p::kv(
+        "Max Fee",
+        &format!("{} stroops", format_thousands(profile.max_fee_stroops)),
+    );
+    p::separator();
+
+    if violations.is_empty() {
+        p::success(&format!(
+            "All simulation resource metrics within profile '{}' ceilings.",
+            profile.name
+        ));
+    } else {
+        p::error(&format!(
+            "Profile '{}' ceiling assertion failed ({} violation(s)):",
+            profile.name,
+            violations.len()
+        ));
+        for v in violations {
+            println!(
+                "  • {}: actual {} vs ceiling {}",
+                v.metric, v.actual, v.ceiling
+            );
+        }
+    }
+}
+
+/// Machine-readable form of a resource report with optional profile evaluation.
+pub fn report_json_with_profile(
+    resources: &SimulationResources,
+    plan: &ResourceFeePlan,
+    profile_eval: Option<(&SimulationProfile, &[ProfileViolation])>,
+) -> Value {
+    let mut base = report_json(resources, plan);
+    if let Some((profile, violations)) = profile_eval {
+        base["profile"] = serde_json::json!({
+            "name": profile.name,
+            "description": profile.description,
+            "passed": violations.is_empty(),
+            "violations_count": violations.len(),
+            "violations": violations,
+            "ceilings": {
+                "max_cpu_instructions": profile.max_cpu_instructions,
+                "max_memory_bytes": profile.max_memory_bytes,
+                "max_read_bytes": profile.max_read_bytes,
+                "max_write_bytes": profile.max_write_bytes,
+                "max_total_entries": profile.max_total_entries,
+                "max_fee_stroops": profile.max_fee_stroops,
+            }
+        });
+    }
+    base
 }
 
 /// Machine-readable form of a resource report, for `--json` output.
@@ -960,5 +1250,89 @@ mod tests {
         assert_eq!(format_thousands(999), "999");
         assert_eq!(format_thousands(1_000), "1,000");
         assert_eq!(format_thousands(1_274_180), "1,274,180");
+    }
+
+    #[test]
+    fn retrieves_built_in_profiles() {
+        assert!(get_profile("ci-smoke").is_ok());
+        assert!(get_profile("ci-full").is_ok());
+        assert!(get_profile("dev-fast").is_ok());
+        assert!(get_profile("CI-SMOKE").is_ok()); // case-insensitive
+
+        let err = get_profile("nonexistent-profile").unwrap_err();
+        assert!(matches!(
+            err,
+            SimulationResourceError::UnknownProfile { .. }
+        ));
+        assert!(err.to_string().contains("unknown simulation profile"));
+        assert!(err.to_string().contains("ci-smoke"));
+    }
+
+    #[test]
+    fn validates_simulation_against_profile_ceilings() {
+        let profile = get_profile("ci-smoke").unwrap();
+        let resources = SimulationResources {
+            min_resource_fee_stroops: 50_000,
+            cpu_instructions: Some(1_000_000),
+            memory_bytes: Some(1_000_000),
+            footprint: Some(SimulationFootprint {
+                read_only_entries: 2,
+                read_write_entries: 2,
+                read_bytes: 10_000,
+                write_bytes: 2_000,
+                instructions: 1_000_000,
+                resource_fee_stroops: 50_000,
+            }),
+            latest_ledger: Some(100),
+            restore_fee_stroops: None,
+            warnings: Vec::new(),
+        };
+        let plan = plan_fee(&resources, 20, 100).unwrap();
+        let violations = validate_against_profile(&resources, &plan, &profile);
+        assert!(violations.is_empty());
+
+        // Test violations when CPU and Memory breach ceiling
+        let heavy_resources = SimulationResources {
+            min_resource_fee_stroops: 500_000,
+            cpu_instructions: Some(10_000_000), // > 2M
+            memory_bytes: Some(10_000_000),     // > 2MB
+            footprint: Some(SimulationFootprint {
+                read_only_entries: 10,
+                read_write_entries: 10, // 20 entries > 10
+                read_bytes: 50_000,     // > 32KB
+                write_bytes: 20_000,    // > 8KB
+                instructions: 10_000_000,
+                resource_fee_stroops: 500_000,
+            }),
+            latest_ledger: Some(100),
+            restore_fee_stroops: None,
+            warnings: Vec::new(),
+        };
+        let heavy_plan = plan_fee(&heavy_resources, 20, 100).unwrap();
+        let heavy_violations = validate_against_profile(&heavy_resources, &heavy_plan, &profile);
+        assert!(!heavy_violations.is_empty());
+        assert!(heavy_violations
+            .iter()
+            .any(|v| v.metric == "cpu_instructions"));
+        assert!(heavy_violations.iter().any(|v| v.metric == "memory_bytes"));
+        assert!(heavy_violations
+            .iter()
+            .any(|v| v.metric == "footprint_entries"));
+        assert!(heavy_violations.iter().any(|v| v.metric == "read_bytes"));
+        assert!(heavy_violations.iter().any(|v| v.metric == "write_bytes"));
+        assert!(heavy_violations
+            .iter()
+            .any(|v| v.metric == "recommended_fee_stroops"));
+    }
+
+    #[test]
+    fn report_json_with_profile_includes_profile_eval() {
+        let profile = get_profile("ci-smoke").unwrap();
+        let res = SimulationResources::default();
+        let plan = plan_fee(&res, 20, 100).unwrap();
+        let violations = validate_against_profile(&res, &plan, &profile);
+        let doc = report_json_with_profile(&res, &plan, Some((&profile, &violations)));
+        assert_eq!(doc["profile"]["name"], "ci-smoke");
+        assert_eq!(doc["profile"]["passed"], true);
     }
 }

@@ -364,6 +364,28 @@ impl BatchOptimizer {
             ],
         }
     }
+
+    /// Recommend a worker count for parallel deployment of `contract_count`
+    /// contracts.
+    ///
+    /// Blend the heuristic batch size with the reported host parallelism and
+    /// bound the result to `[1, contract_count]` so a single-contract manifest
+    /// never oversubscribes. `wasm_bytes` is currently advisory (larger WASM
+    /// uploads benefit from fewer concurrent workers to avoid RPC rate limits).
+    pub fn recommend_concurrency(
+        contract_count: usize,
+        wasm_bytes: &[u8],
+        host_parallelism: usize,
+    ) -> usize {
+        let batch = Self::analyze_batch_optimization().batch_size.max(1);
+        let size_cap = if wasm_bytes.len() >= 512 * 1024 {
+            2
+        } else {
+            usize::MAX
+        };
+        let candidate = batch.min(host_parallelism).min(size_cap);
+        candidate.clamp(1, contract_count.max(1))
+    }
 }
 
 /// Scheduling optimizer.
@@ -522,5 +544,26 @@ mod tests {
         let networks = vec!["testnet".to_string(), "mainnet".to_string()];
         let selection = NetworkSelector::select_network(&wasm_bytes, &networks);
         assert!(!selection.recommended_network.is_empty());
+    }
+
+    #[test]
+    fn test_recommend_concurrency_bounded_by_contract_count() {
+        let wasm_bytes = vec![0u8; 1024 * 50]; // small WASM
+        let workers = BatchOptimizer::recommend_concurrency(2, &wasm_bytes, 8);
+        assert_eq!(workers, 2, "must never exceed contract count");
+    }
+
+    #[test]
+    fn test_recommend_concurrency_at_least_one() {
+        let wasm_bytes = vec![0u8; 1024 * 50];
+        let workers = BatchOptimizer::recommend_concurrency(1, &wasm_bytes, 0);
+        assert_eq!(workers, 1);
+    }
+
+    #[test]
+    fn test_recommend_concurrency_caps_for_large_wasm() {
+        let wasm_bytes = vec![0u8; 600 * 1024]; // >= 512 KB
+        let workers = BatchOptimizer::recommend_concurrency(8, &wasm_bytes, 8);
+        assert_eq!(workers, 2);
     }
 }

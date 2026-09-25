@@ -4,6 +4,69 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::fs;
 
+use super::config;
+
+/// Environment variable used to force strict privacy mode, independent of the
+/// persisted configuration (e.g. for CI runners and shared machines).
+pub const PRIVACY_MODE_ENV: &str = "STARFORGE_PRIVACY_MODE";
+
+/// Parse a single toggle-style string into `Option<bool>` (`None` when unset,
+/// `Err`->treated as unset is avoided; unrecognized values fall back to `true`
+/// so an accidentally malformed flag errs toward privacy).
+pub fn parse_privacy_env_value(value: &str) -> Option<bool> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Some(false);
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "1" | "true" | "on" | "enabled" | "yes" | "strict" => Some(true),
+        "0" | "false" | "off" | "disabled" | "no" => Some(false),
+        // Unknown values are treated as enabled (fail closed).
+        _ => Some(true),
+    }
+}
+
+/// Resolve strict privacy mode from config only (pure, testable).
+pub fn privacy_mode_from_config(cfg_privacy: Option<bool>) -> bool {
+    cfg_privacy.unwrap_or(false)
+}
+
+/// True when end-to-end privacy mode is active.
+///
+/// Precedence: `STARFORGE_PRIVACY_MODE` environment variable > persisted
+/// config (`privacy.mode`) > default (off).
+pub fn is_privacy_mode_enabled() -> bool {
+    if let Ok(value) = std::env::var(PRIVACY_MODE_ENV) {
+        return parse_privacy_env_value(&value).unwrap_or(true);
+    }
+    match config::load() {
+        Ok(cfg) => privacy_mode_from_config(cfg.privacy_mode),
+        Err(_) => false,
+    }
+}
+
+/// Persist strict privacy mode in the user configuration.
+pub fn set_privacy_mode(enabled: bool) -> Result<()> {
+    let mut cfg = config::load()?;
+    cfg.privacy_mode = Some(enabled);
+    config::save(&cfg)?;
+    Ok(())
+}
+
+/// Guard an outbound-connection site (telemetry upload, AI cloud calls,
+/// marketplace auto-update) so that strict privacy mode blocks it before any
+/// bytes leave the machine.
+pub fn require_online(what: &str) -> Result<()> {
+    if is_privacy_mode_enabled() {
+        anyhow::bail!(
+            "Blocked by strict privacy mode: {what} would contact an external network \
+             endpoint. Set STARFORGE_PRIVACY_MODE=0 or run `starforge privacy mode off` \
+             to allow outbound connections."
+        );
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrivacyAssessment {
     pub data_subject: String,
@@ -175,4 +238,46 @@ pub fn persist_privacy_report(report: &str) -> Result<String> {
     let path = dir.join("privacy-report.txt");
     fs::write(&path, report)?;
     Ok(path.display().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_privacy_env_accepts_toggle_values() {
+        for (raw, expected) in [
+            ("1", true),
+            ("true", true),
+            ("on", true),
+            ("enabled", true),
+            ("strict", true),
+            ("0", false),
+            ("false", false),
+            ("off", false),
+            ("disabled", false),
+        ] {
+            assert_eq!(parse_privacy_env_value(raw), Some(expected), "raw={raw}");
+        }
+    }
+
+    #[test]
+    fn parse_privacy_env_empty_means_disabled() {
+        assert_eq!(parse_privacy_env_value(""), Some(false));
+        assert_eq!(parse_privacy_env_value("   "), Some(false));
+    }
+
+    #[test]
+    fn parse_privacy_env_fails_closed_on_unknown_values() {
+        // Malformed flags err toward privacy.
+        assert_eq!(parse_privacy_env_value("banana"), Some(true));
+        assert_eq!(parse_privacy_env_value("maybe"), Some(true));
+    }
+
+    #[test]
+    fn privacy_mode_config_defaults_to_off() {
+        assert!(!privacy_mode_from_config(None));
+        assert!(privacy_mode_from_config(Some(true)));
+        assert!(!privacy_mode_from_config(Some(false)));
+    }
 }

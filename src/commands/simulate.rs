@@ -280,6 +280,10 @@ pub struct ResourcesArgs {
     #[arg(long, default_value_t = simulation_resources::DEFAULT_INCLUSION_FEE_STROOPS)]
     pub inclusion_fee: u64,
 
+    /// Deterministic simulation profile (ci-smoke, ci-full, dev-fast) for resource ceiling assertions
+    #[arg(long)]
+    pub profile: Option<String>,
+
     /// Emit the report as machine-readable JSON
     #[arg(long, default_value = "false")]
     pub json: bool,
@@ -880,6 +884,9 @@ pub(crate) fn validate_resources_args(args: &ResourcesArgs) -> Result<()> {
             args.args.len()
         );
     }
+    if let Some(profile_name) = &args.profile {
+        simulation_resources::get_profile(profile_name).map_err(|e| anyhow::anyhow!("{}", e))?;
+    }
     Ok(())
 }
 
@@ -933,20 +940,55 @@ async fn resource_report(args: ResourcesArgs) -> Result<()> {
         (None, None) => unreachable!("validated above"),
     };
 
-    let plan = simulation_resources::plan_fee(&resources, args.margin, args.inclusion_fee)
+    let profile = match &args.profile {
+        Some(name) => {
+            Some(simulation_resources::get_profile(name).map_err(|e| anyhow::anyhow!("{}", e))?)
+        }
+        None => None,
+    };
+
+    let margin = match &profile {
+        Some(p) if args.margin == simulation_resources::DEFAULT_FEE_MARGIN_PERCENT => {
+            p.default_margin_percent
+        }
+        _ => args.margin,
+    };
+
+    let plan = simulation_resources::plan_fee(&resources, margin, args.inclusion_fee)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
+    let profile_eval = profile.as_ref().map(|p| {
+        let violations = simulation_resources::validate_against_profile(&resources, &plan, p);
+        (p, violations)
+    });
+
     if args.json {
+        let json_eval = profile_eval.as_ref().map(|(p, v)| (*p, v.as_slice()));
         println!(
             "{}",
-            serde_json::to_string_pretty(&simulation_resources::report_json(&resources, &plan))?
+            serde_json::to_string_pretty(&simulation_resources::report_json_with_profile(
+                &resources, &plan, json_eval
+            ))?
         );
     } else {
         simulation_resources::render_report(&resources, &plan);
+        if let Some((p, violations)) = &profile_eval {
+            simulation_resources::render_profile_report(p, violations);
+        }
         p::info(
             "Submit with at least the recommended fee; ledger state can move between \
              simulation and submission.",
         );
+    }
+
+    if let Some((p, violations)) = &profile_eval {
+        if !violations.is_empty() {
+            anyhow::bail!(
+                "Simulation failed profile '{}' assertion with {} violation(s)",
+                p.name,
+                violations.len()
+            );
+        }
     }
 
     Ok(())
@@ -1108,6 +1150,7 @@ mod resource_arg_tests {
             network: "testnet".to_string(),
             margin: simulation_resources::DEFAULT_FEE_MARGIN_PERCENT,
             inclusion_fee: simulation_resources::DEFAULT_INCLUSION_FEE_STROOPS,
+            profile: None,
             json: false,
         }
     }
@@ -1117,6 +1160,27 @@ mod resource_arg_tests {
         let mut a = args();
         a.file = Some(PathBuf::from("sim.json"));
         assert!(validate_resources_args(&a).is_ok());
+    }
+
+    #[test]
+    fn accepts_valid_simulation_profile() {
+        let mut a = args();
+        a.file = Some(PathBuf::from("sim.json"));
+        a.profile = Some("ci-smoke".to_string());
+        assert!(validate_resources_args(&a).is_ok());
+
+        a.profile = Some("dev-fast".to_string());
+        assert!(validate_resources_args(&a).is_ok());
+    }
+
+    #[test]
+    fn rejects_unknown_simulation_profile_loudly() {
+        let mut a = args();
+        a.file = Some(PathBuf::from("sim.json"));
+        a.profile = Some("invalid-profile".to_string());
+        let err = validate_resources_args(&a).unwrap_err();
+        assert!(err.to_string().contains("unknown simulation profile"));
+        assert!(err.to_string().contains("invalid-profile"));
     }
 
     #[test]

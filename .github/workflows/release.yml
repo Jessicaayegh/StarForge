@@ -4,14 +4,44 @@ on:
   push:
     tags:
       - "v*"
+  # Dry run: builds, smoke-tests and packages every platform archive plus
+  # SHA256SUMS.txt as workflow artifacts, without publishing a release,
+  # attesting provenance, or touching the Homebrew formula. Use it to check
+  # the release matrix before pushing a tag.
+  workflow_dispatch:
 
+# Least privilege by default; jobs that publish or attest opt in below.
 permissions:
-  contents: write
+  contents: read
+
+# Never cancel a release that is already in flight.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
+  secure-defaults:
+    name: Secure Defaults Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - name: Run secure defaults audit
+        run: cargo test --test secure_defaults_audit --locked
+
   build:
     name: Build (${{ matrix.archive_name }}.${{ matrix.archive_ext }})
+    needs: secure-defaults
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write      # build provenance attestation (OIDC)
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -23,10 +53,18 @@ jobs:
             archive_ext: tar.gz
             binary_name: starforge
 
-          # macOS ARM64 — native on macos-latest (M1 runner)
+          # macOS ARM64 — native on macos-latest (M1/M2 runner)
           - os: macos-latest
             target: aarch64-apple-darwin
-            archive_name: starforge-macos-aarch64
+            archive_name: starforge-darwin-aarch64
+            archive_ext: tar.gz
+            binary_name: starforge
+
+          # macOS x86_64 — native on macos-15-intel (macos-13 was retired
+          # by GitHub, so jobs targeting it would never be scheduled)
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            archive_name: starforge-darwin-x86_64
             archive_ext: tar.gz
             binary_name: starforge
 
@@ -37,7 +75,7 @@ jobs:
             archive_ext: zip
             binary_name: starforge.exe
 
-          # Linux ARM64 — cross-compiled using `cross`
+          # Linux ARM64 — cross-compiled with gcc-aarch64-linux-gnu
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             archive_name: starforge-linux-aarch64
@@ -52,10 +90,11 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # Cross-compiled natively with a gcc cross-linker (not `cross`).
       # Only runs for the aarch64-unknown-linux-gnu matrix entry
       - name: Install aarch64 Linux cross-linker
         if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: sudo apt-get install -y gcc-aarch64-linux-gnu
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
 
       # Tells cargo which linker to use when targeting aarch64 Linux
       - name: Configure cargo linker for aarch64 Linux
@@ -70,17 +109,45 @@ jobs:
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
 
+      # Every natively built Unix binary must at least start. The aarch64 Linux
+      # binary is cross-compiled and cannot execute on the x86_64 runner.
+      - name: Smoke test binary (Linux / macOS)
+        if: runner.os != 'Windows' && matrix.target != 'aarch64-unknown-linux-gnu'
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release/${{ matrix.binary_name }}"
+          "$BIN" --version
+          "$BIN" --help > /dev/null
+
+      # RELEASE-BLOCKING for Windows: the publish job depends on this build
+      # job, so a Windows binary that cannot start or whose --help/doctor
+      # surface is broken stops the release here, before packaging.
+      - name: Smoke test Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File tests/installer/windows_smoke.ps1 -Binary "target\${{ matrix.target }}\release\${{ matrix.binary_name }}"
+
+      - name: Upload Windows smoke logs
+        if: failure() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release-smoke-logs-${{ matrix.target }}
+          path: windows-smoke.log
+          retention-days: 14
+          if-no-files-found: ignore
+
       # Linux and macOS produce .tar.gz
       - name: Package binary (Linux / macOS)
         if: runner.os != 'Windows'
         run: |
           mkdir -p dist
-          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
-            cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} dist/starforge
+          cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} dist/starforge
+          # Include man pages if present
+          if [ -d man ] && ls man/*.1 >/dev/null 2>&1; then
+            tar -czf "dist/${{ matrix.archive_name }}.tar.gz" -C dist starforge -C "$GITHUB_WORKSPACE" man
           else
-            cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} dist/starforge
+            tar -czf "dist/${{ matrix.archive_name }}.tar.gz" -C dist starforge
           fi
-          tar -czf "dist/${{ matrix.archive_name }}.tar.gz" -C dist starforge
           rm dist/starforge
 
       # Windows produces .zip
@@ -94,47 +161,231 @@ jobs:
           7z a "${{ matrix.archive_name }}.zip" "${{ matrix.binary_name }}"
           rm "${{ matrix.binary_name }}"
 
-      # Generate checksums for all archives
-      - name: Generate checksums
-        shell: bash
-        run: |
-          cd dist
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            certutil -hashfile "${{ matrix.archive_name }}.zip" SHA256 | grep -v "SHA256 hash" | grep -v "^$" > checksums.txt
-          else
-            sha256sum "${{ matrix.archive_name }}.tar.gz" >> checksums.txt
-          fi
-
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.archive_name }}
-          path: |
-            dist/${{ matrix.archive_name }}.*
-            dist/checksums.txt
+          path: dist/${{ matrix.archive_name }}.*
 
-  release:
-    name: Publish GitHub Release
-    needs: build
+      - name: Attest release archive provenance
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/${{ matrix.archive_name }}.*
+
+  docker:
+    name: Publish multi-arch Docker image
+    needs: secure-defaults
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Pinned by digest (returned in `steps.build.outputs.digest`) rather
+      # than by tag: a multi-arch `docker build-push-action` run produces one
+      # digest covering the whole manifest list, and that digest is what
+      # `docker pull`/Sigstore verification should key off, since a mutable
+      # tag like `v1.2.3` could in principle be moved.
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}
+            ghcr.io/${{ github.repository }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Attest image provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Smoke test the published image
+        run: |
+          docker run --rm "ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}" --version
+
+  packaging:
+    name: Build .deb / .rpm packages
+    needs: secure-defaults
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Install cargo-deb and cargo-generate-rpm
+        run: cargo install cargo-deb cargo-generate-rpm --locked
+
+      # `--no-build`: the binary is already built above; cargo-deb's own
+      # build step would otherwise recompile in a slightly different
+      # profile/target directory than the one its [package.metadata.deb]
+      # asset paths (target/release/starforge) point at.
+      - name: Build .deb package
+        run: cargo deb --no-build
+
+      - name: Build .rpm package
+        run: cargo generate-rpm
+
+      - name: Rename packages to stable, version-independent names
+        run: |
+          mkdir -p dist
+          cp target/debian/*.deb dist/starforge-amd64.deb
+          cp target/generate-rpm/*.rpm dist/starforge-x86_64.rpm
+
+      - name: Smoke test .deb install (Debian)
+        run: |
+          docker run --rm -v "$PWD/dist:/dist:ro" debian:bookworm \
+            bash -c "apt-get update -qq && apt-get install -y -qq /dist/starforge-amd64.deb && starforge --version"
+
+      - name: Smoke test .deb install (Ubuntu)
+        run: |
+          docker run --rm -v "$PWD/dist:/dist:ro" ubuntu:24.04 \
+            bash -c "apt-get update -qq && apt-get install -y -qq /dist/starforge-amd64.deb && starforge --version"
+
+      - name: Smoke test .rpm install (Fedora)
+        run: |
+          docker run --rm -v "$PWD/dist:/dist:ro" fedora:latest \
+            bash -c "dnf install -y -q /dist/starforge-x86_64.rpm && starforge --version"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: starforge-packages
+          path: |
+            dist/starforge-amd64.deb
+            dist/starforge-x86_64.rpm
+
+      - name: Attest package provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/starforge-amd64.deb
+            dist/starforge-x86_64.rpm
+
+  sbom:
+    name: Generate Software Bill of Materials (SBOM)
+    needs: secure-defaults
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run SBOM unit tests
+        run: python -m unittest tests/sbom_test.py
+
+      - name: Generate CycloneDX and SPDX SBOMs
+        run: |
+          mkdir -p dist
+          python scripts/generate_sbom.py \
+            --lock-file Cargo.lock \
+            --version "${{ github.ref_name }}" \
+            --out-dir dist \
+            --format both
+
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: starforge-sbom
+          path: |
+            dist/starforge-sbom.cdx.json
+            dist/starforge-sbom.spdx.json
+
+      - name: Attest SBOM provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/starforge-sbom.cdx.json
+            dist/starforge-sbom.spdx.json
+
+  release:
+    name: Publish GitHub Release
+    needs: [build, packaging, sbom]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write      # create the release and upload assets
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Test release artifact validation
+        run: python -m unittest tests/release_artifacts_test.py
+
+      - name: Test SBOM generator
+        run: python -m unittest tests/sbom_test.py
+
+      - name: Test release notes generator
+        run: python -m unittest tests/release_notes_test.py
+
+      - name: Generate release notes
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION="0.0.0-dry-run+${GITHUB_SHA::7}"
+          fi
+          python scripts/release_notes.py \
+            --repo "$GITHUB_WORKSPACE" \
+            --version "$VERSION" \
+            --out BODY.md
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-artifacts
+          # Only the platform archives; ignore any diagnostic log artifacts.
+          pattern: starforge-*
 
       - name: Prepare release files
         run: |
-          mkdir -p release-files
-          find release-artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec cp {} release-files/ \;
-          find release-artifacts -type f -name "checksums.txt" -exec cat {} >> release-files/SHA256SUMS.txt \;
-          cp registry-api/openapi.json release-files/openapi.json
+          python scripts/release_artifacts.py release-artifacts release-files
+
+      - name: Upload release files (dry run)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-files-dry-run
+          path: |
+            release-files/
+            BODY.md
+          retention-days: 7
 
       - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          body_path: BODY.md
           files: |
             release-files/*
 
@@ -143,48 +394,121 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
 
       - name: Extract version from tag
         id: version
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Download Linux binary
-        uses: actions/download-artifact@v4
+      - name: Verify release artifacts exist
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+          BASE_URL="https://api.github.com/repos/${REPO}/releases/tags/v${VERSION}"
+          
+          echo "Checking release artifacts for v${VERSION}..."
+          
+          # Get release info
+          RELEASE_INFO=$(curl -sSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "${BASE_URL}")
+          
+          if echo "$RELEASE_INFO" | grep -q '"message": "Not Found"'; then
+            echo "ERROR: Release v${VERSION} not found"
+            exit 1
+          fi
+          
+          # Check for required artifacts
+          REQUIRED_ARTIFACTS=(
+            "starforge-darwin-x86_64.tar.gz"
+            "starforge-darwin-aarch64.tar.gz"
+            "starforge-linux-x86_64.tar.gz"
+            "starforge-linux-aarch64.tar.gz"
+          )
+          
+          MISSING=()
+          for artifact in "${REQUIRED_ARTIFACTS[@]}"; do
+            if ! echo "$RELEASE_INFO" | grep -q "\"name\": \"${artifact}\""; then
+              MISSING+=("$artifact")
+            fi
+          done
+          
+          if [ ${#MISSING[@]} -gt 0 ]; then
+            echo "ERROR: Missing required release artifacts:"
+            printf '  %s\n' "${MISSING[@]}"
+            echo ""
+            echo "Available assets:"
+            echo "$RELEASE_INFO" | jq -r '.assets[].name' | sed 's/^/  /'
+            exit 1
+          fi
+          
+          echo "All required artifacts found in release v${VERSION}"
+
+      - name: Update Homebrew formula
+        id: update_formula
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          FORMULA_PATH: packaging/homebrew/starforge.rb
+        run: |
+          bash scripts/update-homebrew-formula.sh "$VERSION"
+
+      - name: Check for formula changes
+        id: changes
+        run: |
+          if git diff --quiet packaging/homebrew/starforge.rb; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No changes to formula"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Formula has changes:"
+            git diff packaging/homebrew/starforge.rb
+          fi
+
+      - name: Create PR with formula update
+        if: steps.changes.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
         with:
-          name: starforge-linux-x86_64
-          path: homebrew-build
-
-      - name: Generate Homebrew formula
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          TARBALL="https://github.com/${{ github.repository }}/releases/download/v${VERSION}/starforge-linux-x86_64.tar.gz"
-          SHA256=$(cd homebrew-build && sha256sum starforge-linux-x86_64.tar.gz | cut -d' ' -f1)
-
-          cat > homebrew-formula.rb << EOF
-          class Starforge < Formula
-            desc "Deploy Soroban smart contracts with enhanced CLI"
-            homepage "https://github.com/${{ github.repository }}"
-            url "${TARBALL}"
-            sha256 "${SHA256}"
-            version "${VERSION}"
-
-            def install
-              bin.install "starforge"
-            end
-
-            test do
-              assert_match version.to_s, shell_output("#{bin}/starforge --version")
-            end
-          end
-          EOF
-
-          cat homebrew-formula.rb
-
-      - name: Create PR to homebrew-core (optional)
-        run: |
-          echo "Homebrew formula generated. Manual PR creation or automation can be set up."
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore(homebrew): update formula to v${{ steps.version.outputs.version }}"
+          title: "chore(homebrew): update formula to v${{ steps.version.outputs.version }}"
+          body: |
+            Automated update of Homebrew formula for release v${{ steps.version.outputs.version }}.
+            
+            This PR updates:
+            - Formula version to ${{ steps.version.outputs.version }}
+            - Download URLs for all supported platforms
+            - SHA256 checksums for all release artifacts
+            
+            **Platforms covered:**
+            - macOS Intel (darwin-x86_64)
+            - macOS ARM (darwin-aarch64)
+            - Linux x86_64 (linux-x86_64)
+            - Linux ARM64 (linux-aarch64)
+            
+            **Validation:**
+            - All release artifacts verified to exist
+            - Checksums computed from actual release assets
+            - Formula syntax validated
+            - Homebrew smoke test passed (if runner supports it)
+            
+            Closes #658
+          branch: homebrew-update-v${{ steps.version.outputs.version }}
+          base: ${{ github.event.repository.default_branch }}
+          labels: |
+            homebrew
+            automated
+            dependencies
 

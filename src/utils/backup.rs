@@ -679,7 +679,7 @@ mod tests {
         let src_dir = tempdir().unwrap();
         let f1 = make_source_file(src_dir.path(), "a.wasm", "hello-wasm");
 
-        let bytes = zip_sources(&[f1.clone()]).unwrap();
+        let bytes = zip_sources(std::slice::from_ref(&f1)).unwrap();
         let out_dir = tempdir().unwrap();
         let extracted = extract_zip(&bytes, out_dir.path()).unwrap();
         assert_eq!(extracted.len(), 1);
@@ -691,7 +691,7 @@ mod tests {
     fn checksum_changes_when_contents_change() {
         let dir = tempdir().unwrap();
         let f1 = make_source_file(dir.path(), "a.txt", "v1");
-        let b1 = zip_sources(&[f1.clone()]).unwrap();
+        let b1 = zip_sources(std::slice::from_ref(&f1)).unwrap();
         let f2 = make_source_file(dir.path(), "a.txt", "v2");
         let b2 = zip_sources(&[f2]).unwrap();
         assert_ne!(

@@ -32,6 +32,8 @@ examine_globs = [
     "src/utils/contract_mocks.rs",
     "src/utils/contract_testing.rs",
     "src/utils/test_generator.rs",
+    # Wallet backup/import cryptographic code (HIGH IMPACT)
+    "src/utils/wallet_import.rs",
 ]
 
 # ── Skip ─────────────────────────────────────────────────────────────────────
@@ -47,3 +49,8 @@ skip_calls = [
     # Skip telemetry helpers.
     ".*telemetry.*",
 ]
+
+# ── Thresholds ───────────────────────────────────────────────────────────────
+# Minimum kill rate (mutation score) required for wallet_import module.
+# Set to 85% to ensure test suite is sensitive enough to catch cryptographic errors.
+minimum_kill_rate = 0.85

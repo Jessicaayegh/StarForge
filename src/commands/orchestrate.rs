@@ -1,6 +1,6 @@
 use crate::utils::deploy_orchestrator::{
-    build_plan, execute_plan, list_states, load_manifest, load_state, render_dag, rollback,
-    save_state,
+    build_plan, default_concurrency, execute_plan, execute_plan_parallel, list_states,
+    load_manifest, load_state, render_dag, rollback, save_state,
 };
 use crate::utils::print as p;
 use anyhow::Result;
@@ -37,6 +37,10 @@ pub struct ExecuteArgs {
     pub id: Option<String>,
     #[arg(long, default_value = "true")]
     pub dry_run: bool,
+    /// Worker count for parallel deployment: a number >= 1, or "auto" to size
+    /// the pool from the host's parallel CPU count (default: 1 = sequential).
+    #[arg(long, default_value = "1")]
+    pub concurrency: String,
 }
 
 #[derive(Args)]
@@ -104,7 +108,22 @@ fn handle_execute(args: ExecuteArgs) -> Result<()> {
         anyhow::bail!("Specify --file or --id");
     };
 
-    execute_plan(&mut state, args.dry_run)?;
+    let concurrency = if args.concurrency == "auto" {
+        default_concurrency()
+    } else {
+        args.concurrency.parse::<usize>().map_err(|_| {
+            anyhow::anyhow!(
+                "--concurrency must be a positive integer or 'auto', got '{}'",
+                args.concurrency
+            )
+        })?
+    };
+
+    if concurrency > 1 {
+        execute_plan_parallel(&mut state, args.dry_run, concurrency)?;
+    } else {
+        execute_plan(&mut state, args.dry_run)?;
+    }
 
     p::kv("Deployment ID", &state.id);
     p::kv("Status", &state.status);

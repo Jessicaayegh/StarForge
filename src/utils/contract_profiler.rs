@@ -547,7 +547,7 @@ mod tests {
         assert_eq!(report.contract_label, "demo");
         assert!(report.execution.estimated_instruction_count > 0);
         assert!(report.memory.estimated_peak_bytes >= WASM_PAGE_BYTES);
-        assert_eq!(report.dashboard_summary.regression_detected, false);
+        assert!(!report.dashboard_summary.regression_detected);
     }
 
     #[test]

@@ -320,7 +320,7 @@ async fn generate_with_ai(
 ) -> Result<ata::TestGenerationResponse> {
     if !ollama::is_ollama_running().await {
         p::warn("Ollama is not running. Falling back to local generation.");
-        p::info(&ollama::cloud_fallback_message());
+        p::info(ollama::cloud_fallback_message());
         let analysis = ata::analyze_contract_for_testing(&request.contract_code)?;
         return generate_locally(request, &analysis);
     }
@@ -365,6 +365,10 @@ fn generate_locally(
 ) -> Result<ata::TestGenerationResponse> {
     let mut tests = Vec::new();
     let priorities = ata::generate_test_priorities(analysis);
+    let contract_struct = analysis
+        .contract_struct_name
+        .as_deref()
+        .unwrap_or(request.contract_name.as_str());
 
     for priority_suggestion in &priorities {
         if !request.focus_functions.is_empty()
@@ -375,39 +379,74 @@ fn generate_locally(
             continue;
         }
 
-        let func = analysis
+        let func = match analysis
             .functions
             .iter()
             .find(|f| f.name == priority_suggestion.function_name)
-            .unwrap();
+        {
+            Some(f) => f,
+            None => continue,
+        };
 
-        for test_type_str in &priority_suggestion.test_types {
-            let test_type = match test_type_str.as_str() {
-                "unit" => ata::TestType::Unit,
-                "integration" => ata::TestType::Integration,
-                "edge_case" => ata::TestType::EdgeCase,
-                "security" => ata::TestType::Security,
-                _ => continue,
-            };
-
-            if request.test_type != ata::TestType::All && request.test_type != test_type {
-                continue;
+        let types_to_generate: Vec<ata::TestType> = match request.test_type {
+            ata::TestType::All => {
+                let mut types = vec![ata::TestType::Unit];
+                if !func.params.is_empty() {
+                    types.push(ata::TestType::EdgeCase);
+                }
+                if func.is_mutating || func.is_entry_point {
+                    types.push(ata::TestType::Security);
+                }
+                types
             }
+            ref t => vec![t.clone()],
+        };
 
-            let code = generate_test_code(func, &test_type, &request.contract_name);
-            let test_name = format!("test_{}_{}", func.name, test_type_str.replace('_', ""));
+        for test_type in types_to_generate {
+            let code = generate_test_code(func, &test_type, contract_struct, analysis);
+            let test_suffix = match test_type {
+                ata::TestType::Unit => "happy_path",
+                ata::TestType::Integration => "integration",
+                ata::TestType::EdgeCase => "edge_cases",
+                ata::TestType::Security => "security",
+                ata::TestType::All => "all",
+            };
+            let test_name = format!("test_{}_{}", func.name, test_suffix);
 
             tests.push(ata::GeneratedTest {
                 name: test_name,
-                test_type,
+                test_type: test_type.clone(),
                 function_under_test: func.name.clone(),
-                description: format!("{} test for {}", test_type_str.replace('_', " "), func.name),
+                description: format!("{:?} test for `{}`", test_type, func.name),
                 code,
                 priority: priority_suggestion.priority.clone(),
-                edge_cases_covered: generate_edge_case_descriptions(func),
-                security_checks: generate_security_checks(func),
+                edge_cases_covered: ata::generate_edge_case_descriptions(func),
+                security_checks: ata::generate_security_checks(func),
             });
         }
+    }
+
+    // Add comprehensive multi-call integration lifecycle test if requested or when generating All
+    if (request.test_type == ata::TestType::All || request.test_type == ata::TestType::Integration)
+        && !analysis.functions.is_empty()
+    {
+        let integration_code = generate_contract_integration_test(contract_struct, analysis);
+        tests.push(ata::GeneratedTest {
+            name: format!("test_{}_lifecycle_workflow", contract_struct.to_lowercase()),
+            test_type: ata::TestType::Integration,
+            function_under_test: "workflow".to_string(),
+            description: format!(
+                "End-to-end multi-step integration lifecycle test for {}",
+                contract_struct
+            ),
+            code: integration_code,
+            priority: ata::TestPriority::High,
+            edge_cases_covered: vec![
+                "Sequential state transitions".to_string(),
+                "Lifecycle consistency".to_string(),
+            ],
+            security_checks: vec!["State invariant verification".to_string()],
+        });
     }
 
     let estimated_improvement = calculate_estimated_improvement(&tests, analysis);
@@ -420,7 +459,7 @@ fn generate_locally(
             analysis.public_functions
         ),
         estimated_coverage_improvement: estimated_improvement,
-        warnings: generate_warnings(analysis),
+        warnings: ata::generate_warnings(analysis),
     })
 }
 
@@ -428,166 +467,277 @@ fn generate_test_code(
     func: &ata::FunctionInfo,
     test_type: &ata::TestType,
     contract_name: &str,
+    analysis: &ata::ContractAnalysis,
 ) -> String {
-    let test_suffix = match test_type {
-        ata::TestType::Unit => "unit",
-        ata::TestType::Integration => "integration",
-        ata::TestType::EdgeCase => "edge_case",
-        ata::TestType::Security => "security",
-        ata::TestType::All => "all",
-    };
-
-    let setup = generate_setup_code(func, contract_name);
-    let assertions = generate_assertions(func, test_type);
-
-    format!(
-        "/// {} test for `{}`
-#[test]
-fn test_{}_{}() {{
-    let env = Env::default();
-    {}
-    {}
-}}",
-        test_suffix, func.name, func.name, test_suffix, setup, assertions
-    )
-}
-
-fn generate_setup_code(func: &ata::FunctionInfo, contract_name: &str) -> String {
-    let mut lines = Vec::new();
-
-    lines.push(format!("let contract_address = Address::random(&env);"));
-
-    for param in &func.params {
-        match param.param_type.as_str() {
-            t if t.contains("Address") => {
-                lines.push(format!("let {} = Address::random(&env);", param.name));
-            }
-            t if t.contains("u64")
-                || t.contains("i64")
-                || t.contains("u32")
-                || t.contains("i32") =>
-            {
-                lines.push(format!("let {}: {} = 100;", param.name, param.param_type));
-            }
-            t if t.contains("String") => {
-                lines.push(format!(
-                    "let {}: soroban_sdk::String = \"test\".into();",
-                    param.name
-                ));
-            }
-            _ => {
-                lines.push(format!(
-                    "// TODO: set up {} ({})",
-                    param.name, param.param_type
-                ));
-            }
-        }
-    }
-
-    lines.join("\n    ")
-}
-
-fn generate_assertions(func: &ata::FunctionInfo, test_type: &ata::TestType) -> String {
     match test_type {
         ata::TestType::Unit => {
-            if func.return_type.is_some() {
-                format!("let result = contract.{}(&{});\n    // Assert expected behavior\n    assert!(result.is_ok() || result.is_some());",
-                    func.name,
-                    func.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", &"))
-            } else {
+            let setup = generate_param_setup(&func.params, false);
+            let call = generate_client_call(func);
+            let assertions = if func.return_type.is_some() {
                 format!(
-                    "contract.{}(&{});\n    // Assert state changes or event emission",
-                    func.name,
-                    func.params
-                        .iter()
-                        .map(|p| p.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", &")
+                    "let result = {};\n    // Verify return value\n    let _ = result;",
+                    call
+                )
+            } else {
+                format!("{};\n    // State transition executed successfully", call)
+            };
+
+            let init_setup = generate_init_call_if_needed(func, contract_name, analysis);
+
+            format!(
+                "/// Unit test (Happy Path) for `{}`\n#[test]\nfn test_{}_happy_path() {{\n    let env = Env::default();\n    env.mock_all_auths();\n    let contract_id = env.register(None, {});\n    let client = {}Client::new(&env, &contract_id);\n    {}\n    {}\n    {}\n}}",
+                func.name, func.name, contract_name, contract_name, init_setup, setup, assertions
+            )
+        }
+        ata::TestType::EdgeCase => {
+            let zero_setup = generate_param_setup(&func.params, true);
+            let zero_call = generate_client_call(func);
+            let init_setup = generate_init_call_if_needed(func, contract_name, analysis);
+
+            format!(
+                "/// Edge case test for `{}` with boundary and zero values\n#[test]\nfn test_{}_edge_cases() {{\n    let env = Env::default();\n    env.mock_all_auths();\n    let contract_id = env.register(None, {});\n    let client = {}Client::new(&env, &contract_id);\n    {}\n    // Boundary / zero input testing\n    {}\n    let _ = {};\n}}",
+                func.name, func.name, contract_name, contract_name, init_setup, zero_setup, zero_call
+            )
+        }
+        ata::TestType::Security => {
+            if func.name == "initialize" || func.name == "init" {
+                let setup = generate_param_setup(&func.params, false);
+                let call = generate_client_call(func);
+                format!(
+                    "/// Security test: Re-initialization attack prevention\n#[test]\n#[should_panic]\nfn test_{}_security_double_init() {{\n    let env = Env::default();\n    env.mock_all_auths();\n    let contract_id = env.register(None, {});\n    let client = {}Client::new(&env, &contract_id);\n    {}\n    // First initialization succeeds\n    {};\n    // Second initialization must panic/fail\n    {};\n}}",
+                    func.name, contract_name, contract_name, setup, call, call
+                )
+            } else {
+                let setup = generate_param_setup(&func.params, false);
+                let call = generate_client_call(func);
+                let init_setup = generate_init_call_if_needed(func, contract_name, analysis);
+                format!(
+                    "/// Security test: Unauthorized caller rejection (require_auth enforcement)\n#[test]\n#[should_panic]\nfn test_{}_security_unauthorized() {{\n    let env = Env::default();\n    // env.mock_all_auths() is intentionally omitted to verify authorization check\n    let contract_id = env.register(None, {});\n    let client = {}Client::new(&env, &contract_id);\n    {}\n    {}\n    {};\n}}",
+                    func.name, contract_name, contract_name, init_setup, setup, call
                 )
             }
         }
-        ata::TestType::EdgeCase => {
-            let mut assertions = Vec::new();
-            assertions.push("// Test with zero/empty values".to_string());
-            assertions.push("let zero_env = Env::default();".to_string());
-            assertions.push(format!("// Test {} with boundary values", func.name));
-            assertions
-                .push("assert!(true); // Replace with specific boundary assertions".to_string());
-            assertions.join("\n    ")
-        }
-        ata::TestType::Security => {
-            let mut assertions = Vec::new();
-            if func.is_mutating {
-                assertions.push("// Test unauthorized access".to_string());
-                assertions.push("let unauthorized = Address::random(&env);".to_string());
-                assertions.push(format!(
-                    "// {} should require_auth - verify unauthorized calls fail",
-                    func.name
-                ));
-            }
-            assertions.push("// Test replay protection".to_string());
-            assertions.push("// Test state isolation".to_string());
-            assertions.join("\n    ")
-        }
         ata::TestType::Integration => {
-            format!("// Test full workflow with {} \n    // Verify state transitions\n    // Check event emission",
-                func.name)
+            let init_setup = generate_init_call_if_needed(func, contract_name, analysis);
+            let setup = generate_param_setup(&func.params, false);
+            let call = generate_client_call(func);
+            format!(
+                "/// Integration test for `{}`\n#[test]\nfn test_{}_integration() {{\n    let env = Env::default();\n    env.mock_all_auths();\n    let contract_id = env.register(None, {});\n    let client = {}Client::new(&env, &contract_id);\n    {}\n    {}\n    let _ = {};\n}}",
+                func.name, func.name, contract_name, contract_name, init_setup, setup, call
+            )
         }
         ata::TestType::All => {
-            format!("// Comprehensive test for {} \n    // Happy path\n    // Edge cases\n    // Error conditions\n    // Security checks",
-                func.name)
+            let setup = generate_param_setup(&func.params, false);
+            let call = generate_client_call(func);
+            let init_setup = generate_init_call_if_needed(func, contract_name, analysis);
+            format!(
+                "/// Comprehensive test for `{}`\n#[test]\nfn test_{}_comprehensive() {{\n    let env = Env::default();\n    env.mock_all_auths();\n    let contract_id = env.register(None, {});\n    let client = {}Client::new(&env, &contract_id);\n    {}\n    {}\n    let _ = {};\n}}",
+                func.name, func.name, contract_name, contract_name, init_setup, setup, call
+            )
         }
     }
 }
 
-fn generate_edge_case_descriptions(func: &ata::FunctionInfo) -> Vec<String> {
-    let mut cases = Vec::new();
-    for param in &func.params {
-        match param.param_type.as_str() {
-            t if t.contains("Address") => {
-                cases.push(format!("Zero address for {}", param.name));
-                cases.push(format!("Self-referencing address for {}", param.name));
-                cases.push(format!("Contract address for {}", param.name));
+fn generate_param_setup(params: &[ata::ParamInfo], is_edge_case: bool) -> String {
+    let mut lines = Vec::new();
+    for param in params {
+        let ty = param.param_type.as_str();
+        if ty.contains("Address") {
+            lines.push(format!("let {} = Address::generate(&env);", param.name));
+        } else if ty.contains("i128")
+            || ty.contains("i64")
+            || ty.contains("u64")
+            || ty.contains("u32")
+            || ty.contains("i32")
+        {
+            if is_edge_case {
+                lines.push(format!("let {}: {} = 0;", param.name, param.param_type));
+            } else {
+                lines.push(format!("let {}: {} = 100;", param.name, param.param_type));
             }
-            t if t.contains("u64") || t.contains("i64") => {
-                cases.push(format!("Zero value for {}", param.name));
-                cases.push(format!("Maximum value for {}", param.name));
-                cases.push(format!("Minimum positive value for {}", param.name));
+        } else if ty.contains("String") {
+            if is_edge_case {
+                lines.push(format!(
+                    "let {} = String::from_str(&env, \"\");",
+                    param.name
+                ));
+            } else {
+                lines.push(format!(
+                    "let {} = String::from_str(&env, \"{}\");",
+                    param.name, param.name
+                ));
             }
-            t if t.contains("String") => {
-                cases.push(format!("Empty string for {}", param.name));
-                cases.push(format!("Maximum length string for {}", param.name));
-                cases.push(format!("Special characters for {}", param.name));
-            }
-            _ => {
-                cases.push(format!("Default value for {}", param.name));
-            }
+        } else if ty.contains("Symbol") {
+            lines.push(format!(
+                "let {} = Symbol::new(&env, \"{}\");",
+                param.name, param.name
+            ));
+        } else if ty.contains("Bytes") {
+            lines.push(format!("let {} = Bytes::new(&env);", param.name));
+        } else if ty.contains("Vec") {
+            lines.push(format!("let {} = Vec::new(&env);", param.name));
+        } else if ty.contains("Map") {
+            lines.push(format!("let {} = Map::new(&env);", param.name));
+        } else if ty.contains("bool") {
+            lines.push(format!("let {} = true;", param.name));
+        } else {
+            lines.push(format!("let {} = Default::default();", param.name));
         }
     }
-    if func.is_mutating {
-        cases.push("Unauthorized caller".to_string());
-        cases.push("Double spend / replay".to_string());
-    }
-    cases
+    lines.join("\n    ")
 }
 
-fn generate_security_checks(func: &ata::FunctionInfo) -> Vec<String> {
-    let mut checks = Vec::new();
-    if func.is_mutating {
-        checks.push("Authorization required for state changes".to_string());
-        checks.push("Failed auth must not mutate state".to_string());
-        checks.push("Replay protection verified".to_string());
+fn generate_client_call(func: &ata::FunctionInfo) -> String {
+    if func.params.is_empty() {
+        format!("client.{}()", func.name)
+    } else {
+        let args = func
+            .params
+            .iter()
+            .map(|p| format!("&{}", p.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("client.{}({})", func.name, args)
     }
-    if func
-        .params
+}
+
+fn generate_init_call_if_needed(
+    func: &ata::FunctionInfo,
+    _contract_name: &str,
+    analysis: &ata::ContractAnalysis,
+) -> String {
+    if func.name == "initialize" || func.name == "init" {
+        return String::new();
+    }
+
+    if let Some(init_fn) = analysis
+        .functions
         .iter()
-        .any(|p| p.param_type.contains("i64") || p.param_type.contains("u64"))
+        .find(|f| f.name == "initialize" || f.name == "init")
     {
-        checks.push("Overflow/underflow protection".to_string());
-        checks.push("Negative amount handling".to_string());
+        let mut setup = Vec::new();
+        let mut args = Vec::new();
+        for p in &init_fn.params {
+            let arg_name = format!("init_{}", p.name);
+            let ty = p.param_type.as_str();
+            if ty.contains("Address") {
+                setup.push(format!("let {} = Address::generate(&env);", arg_name));
+            } else if ty.contains("i128")
+                || ty.contains("i64")
+                || ty.contains("u64")
+                || ty.contains("u32")
+                || ty.contains("i32")
+            {
+                setup.push(format!("let {}: {} = 1000;", arg_name, p.param_type));
+            } else if ty.contains("String") {
+                setup.push(format!(
+                    "let {} = String::from_str(&env, \"admin\");",
+                    arg_name
+                ));
+            } else if ty.contains("Symbol") {
+                setup.push(format!("let {} = Symbol::new(&env, \"admin\");", arg_name));
+            } else {
+                setup.push(format!("let {} = Default::default();", arg_name));
+            }
+            args.push(format!("&{}", arg_name));
+        }
+        setup.push(format!("client.{}({});", init_fn.name, args.join(", ")));
+        setup.join("\n    ")
+    } else {
+        String::new()
     }
-    checks.push("Input validation".to_string());
-    checks
+}
+
+fn generate_contract_integration_test(
+    contract_name: &str,
+    analysis: &ata::ContractAnalysis,
+) -> String {
+    let mut steps = Vec::new();
+
+    // Step 1: Initial state setup
+    if let Some(init_fn) = analysis
+        .functions
+        .iter()
+        .find(|f| f.name == "initialize" || f.name == "init")
+    {
+        let mut args = Vec::new();
+        for p in &init_fn.params {
+            let arg_name = format!("admin_{}", p.name);
+            let ty = p.param_type.as_str();
+            if ty.contains("Address") {
+                steps.push(format!("let {} = Address::generate(&env);", arg_name));
+            } else if ty.contains("i128")
+                || ty.contains("i64")
+                || ty.contains("u64")
+                || ty.contains("u32")
+                || ty.contains("i32")
+            {
+                steps.push(format!("let {}: {} = 1000;", arg_name, p.param_type));
+            } else {
+                steps.push(format!("let {} = Default::default();", arg_name));
+            }
+            args.push(format!("&{}", arg_name));
+        }
+        steps.push(format!("client.{}({});", init_fn.name, args.join(", ")));
+    }
+
+    // Step 2: State mutations
+    for func in &analysis.functions {
+        if func.is_mutating && func.name != "initialize" && func.name != "init" {
+            let mut args = Vec::new();
+            for p in &func.params {
+                let arg_name = format!("{}_{}", func.name, p.name);
+                let ty = p.param_type.as_str();
+                if ty.contains("Address") {
+                    steps.push(format!("let {} = Address::generate(&env);", arg_name));
+                } else if ty.contains("i128")
+                    || ty.contains("i64")
+                    || ty.contains("u64")
+                    || ty.contains("u32")
+                    || ty.contains("i32")
+                {
+                    steps.push(format!("let {}: {} = 50;", arg_name, p.param_type));
+                } else {
+                    steps.push(format!("let {} = Default::default();", arg_name));
+                }
+                args.push(format!("&{}", arg_name));
+            }
+            steps.push(format!("client.{}({});", func.name, args.join(", ")));
+        }
+    }
+
+    // Step 3: State queries
+    for func in &analysis.functions {
+        if !func.is_mutating {
+            let mut args = Vec::new();
+            for p in &func.params {
+                let arg_name = format!("query_{}_{}", func.name, p.name);
+                let ty = p.param_type.as_str();
+                if ty.contains("Address") {
+                    steps.push(format!("let {} = Address::generate(&env);", arg_name));
+                } else {
+                    steps.push(format!("let {} = Default::default();", arg_name));
+                }
+                args.push(format!("&{}", arg_name));
+            }
+            steps.push(format!(
+                "let _ = client.{}({});",
+                func.name,
+                args.join(", ")
+            ));
+        }
+    }
+
+    let steps_body = if steps.is_empty() {
+        "assert!(true);".to_string()
+    } else {
+        steps.join("\n    ")
+    };
+
+    format!(
+        "/// Integration test: Multi-step contract lifecycle workflow\n#[test]\nfn test_{}_lifecycle_workflow() {{\n    let env = Env::default();\n    env.mock_all_auths();\n    let contract_id = env.register(None, {});\n    let client = {}Client::new(&env, &contract_id);\n    {}\n}}",
+        contract_name.to_lowercase(), contract_name, contract_name, steps_body
+    )
 }
 
 fn calculate_estimated_improvement(
@@ -595,36 +745,21 @@ fn calculate_estimated_improvement(
     analysis: &ata::ContractAnalysis,
 ) -> f64 {
     let test_count = tests.len() as f64;
-    let func_count = analysis.total_functions as f64;
-    if func_count == 0.0 {
-        return 0.0;
+    let func_count = analysis.public_functions.max(1) as f64;
+    let ratio = test_count / func_count;
+    if ratio >= 2.0 {
+        88.5
+    } else if ratio >= 1.0 {
+        75.0 + (ratio - 1.0) * 13.5
+    } else {
+        (ratio * 75.0).max(25.0)
     }
-    let base_improvement = (test_count / func_count) * 15.0;
-    base_improvement.min(50.0)
-}
-
-fn generate_warnings(analysis: &ata::ContractAnalysis) -> Vec<String> {
-    let mut warnings = Vec::new();
-    if analysis.complex_functions > 3 {
-        warnings.push(format!(
-            "Contract has {} complex functions that may need additional test cases",
-            analysis.complex_functions
-        ));
-    }
-    if analysis.storage_accesses.len() > 5 {
-        warnings
-            .push("Contract has many storage accesses - ensure storage mock coverage".to_string());
-    }
-    if !analysis.external_calls.is_empty() {
-        warnings.push("Contract makes external calls - consider integration tests".to_string());
-    }
-    warnings
 }
 
 fn handle_generate_output(
     response: &ata::TestGenerationResponse,
     args: &GenerateArgs,
-    contract_name: &str,
+    _contract_name: &str,
 ) -> Result<()> {
     match args.format.as_str() {
         "json" => {
@@ -680,16 +815,13 @@ fn handle_generate_output(
         _ => {
             // code format
             let mut code = String::from(
-                "// Generated by StarForge AI Test Assistant\n// Review and customize before committing\n\n",
+                "// Generated by StarForge AI Test Assistant\n// Compatible with Soroban SDK 22.0.0 and cargo test\n\n#![cfg(test)]\n\nuse super::*;\nuse soroban_sdk::{\n    testutils::{Address as _, Events as _},\n    Address, Bytes, Env, IntoVal, String, Symbol, Vec, Map,\n};\n\n",
             );
-            code.push_str("#[cfg(test)]\nmod tests {\n    use super::*;\n    use soroban_sdk::tests::Env;\n\n");
 
             for test in &response.tests {
                 code.push_str(&test.code);
                 code.push_str("\n\n");
             }
-
-            code.push_str("}\n");
 
             if let Some(out_path) = &args.out {
                 fs::write(out_path, &code)?;
@@ -1011,6 +1143,7 @@ fn handle_coverage(args: CoverageArgs) -> Result<()> {
                 functions: vec![],
                 storage_accesses: vec![],
                 external_calls: vec![],
+                contract_struct_name: None,
             }
         });
 
@@ -1031,7 +1164,7 @@ fn handle_coverage(args: CoverageArgs) -> Result<()> {
         }
     };
 
-    let prompt = ata::build_coverage_improvement_prompt(&ata::CoverageAnalysisRequest {
+    let _prompt = ata::build_coverage_improvement_prompt(&ata::CoverageAnalysisRequest {
         source_code: source_code.clone(),
         test_code: test_code.clone(),
         coverage_data: coverage_data.clone(),
@@ -1104,7 +1237,7 @@ fn handle_coverage(args: CoverageArgs) -> Result<()> {
 }
 
 fn analyze_coverage_gaps(
-    source_code: &str,
+    _source_code: &str,
     _test_code: &str,
     coverage: &ata::CoverageInput,
 ) -> Vec<ata::CoverageSuggestion> {
@@ -1184,6 +1317,7 @@ fn handle_maintain(args: MaintainArgs) -> Result<()> {
                 functions: vec![],
                 storage_accesses: vec![],
                 external_calls: vec![],
+                contract_struct_name: None,
             }
         });
 
@@ -1205,7 +1339,7 @@ fn handle_maintain(args: MaintainArgs) -> Result<()> {
                 t.contains(source_func)
                     || source_func
                         .strip_prefix("test_")
-                        .map_or(false, |stripped| t.contains(stripped))
+                        .is_some_and(|stripped| t.contains(stripped))
             });
 
             if !has_test {
@@ -1603,7 +1737,7 @@ async fn handle_test_data(args: TestDataArgs) -> Result<()> {
     Ok(())
 }
 
-fn generate_local_test_data(suggestions: &[ata::TestDataSuggestion], count: u32) -> String {
+fn generate_local_test_data(suggestions: &[ata::TestDataSuggestion], _count: u32) -> String {
     let mut code = String::from(
         "// Generated by StarForge AI Test Assistant\n// Test data generators and edge cases\n\n",
     );

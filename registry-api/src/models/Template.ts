@@ -13,6 +13,8 @@ export interface ITemplate {
   repository?: string;
   homepage?: string;
   documentation?: string;
+  /** Markdown README displayed by the public registry portal. */
+  readme?: string;
   downloads: number;
   verified: boolean;
   publisherId: string;
@@ -125,5 +127,36 @@ export class TemplateStore {
 
   async delete(id: string): Promise<boolean> {
     return this.templates.delete(id);
+  }
+
+  async findPublisherForName(name: string): Promise<string | null> {
+    for (const tpl of this.templates.values()) {
+      if (tpl.name.toLowerCase() === name.toLowerCase()) {
+        return tpl.publisherId;
+      }
+    }
+    return null;
+  }
+
+  async updatePublisherForName(
+    name: string,
+    newPublisherId: string,
+  ): Promise<number> {
+    let count = 0;
+    for (const [id, tpl] of this.templates.entries()) {
+      if (tpl.name.toLowerCase() === name.toLowerCase()) {
+        this.templates.set(id, {
+          ...tpl,
+          publisherId: newPublisherId,
+          updatedAt: new Date(),
+        });
+        count++;
+      }
+    }
+    return count;
+  }
+
+  async clear(): Promise<void> {
+    this.templates.clear();
   }
 }

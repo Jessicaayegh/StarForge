@@ -1,0 +1,17 @@
+# Docs site: https://nanle-code.github.io/StarForge/
+# Build locally with `mdbook serve docs` (https://rust-lang.github.io/mdBook/).
+[book]
+title = "StarForge"
+description = "Developer productivity CLI for Stellar and Soroban"
+language = "en"
+src = "."
+
+[build]
+build-dir = "../target/docs-site"
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/Nanle-code/StarForge"
+edit-url-template = "https://github.com/Nanle-code/StarForge/edit/master/docs/{path}"
+site-url = "/StarForge/"
+no-section-label = true

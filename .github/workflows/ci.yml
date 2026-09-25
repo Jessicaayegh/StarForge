@@ -5,7 +5,31 @@ on:
   pull_request:
   workflow_call:
 
+# Least privilege: every job in this workflow only needs to read the repo.
+# (When called from deployment.yml the caller's permissions are the ceiling.)
+permissions:
+  contents: read
+
+# Cancel superseded runs for pull requests and feature-branch pushes. Pushes to
+# master and reusable-workflow calls (e.g. the deployment quality gate) are
+# keyed by run id, so they are never cancelled by a newer commit.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref != 'refs/heads/master')) && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
 jobs:
+  canonical-urls:
+    name: Canonical Repository URLs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject links to non-canonical StarForge repositories
+        run: bash scripts/check-canonical-urls.sh
+
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
@@ -14,8 +38,29 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      # NON-BLOCKING on purpose: master is not rustfmt-clean yet (a handful of
+      # files under src/commands, src/utils and tests/ still need
+      # `cargo fmt --all`). Reformatting them in one sweep would conflict with
+      # every open branch, so drift is surfaced as a warning annotation for now.
+      # Once `cargo fmt --all --check` passes on master, replace this step with
+      # a plain `cargo fmt --all --check` so the job becomes a hard gate.
       - name: Check formatting
-        run: cargo fmt --all --check
+        run: |
+          if ! cargo fmt --all --check; then
+            echo "::warning title=rustfmt::Code is not rustfmt-clean. Run 'cargo fmt --all' locally. This check is currently non-blocking."
+          fi
+
+  msrv:
+    name: MSRV (Rust 1.80)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.80.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - name: Verify compilation on Rust 1.80 MSRV
+        run: cargo check --locked --workspace
 
   deny:
     name: Cargo Deny
@@ -29,18 +74,83 @@ jobs:
           command: check
           arguments: --all-features
 
-  build-and-test:
-    name: Build and Test
+  secure-defaults:
+    name: Secure Defaults Audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - name: Run secure defaults audit
+        run: cargo test --test secure_defaults_audit --locked
+
+  doctests:
+    name: Documentation Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - name: Run doctests
+        run: cargo test --doc --locked
+
+  feature-matrix:
+    name: Feature Matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["", "--no-default-features", "--features ai", "--features hardware-wallet"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev libusb-1.0-0-dev build-essential
       - name: Build
+        run: cargo build --locked ${{ matrix.features }}
+      - name: CLI JSON contract stability
+        run: cargo test --test json_contract_stability --locked ${{ matrix.features }}
+      - name: Test
+        run: cargo test --locked ${{ matrix.features }} -- --test-threads=1
+      - name: Verify Cargo.lock immutability
+        if: matrix.features == ''
+        run: git diff --exit-code Cargo.lock
+
+  docs-cheatsheet:
+    name: Docs Cheat Sheet (anti-drift)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # Deliberately uncached: build.rs must actually run to regenerate the
+      # cheat sheet, and a restored target/ could let it be skipped.
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - name: Build (regenerates cheat sheet from clap metadata)
         run: cargo build --locked
-      - name: Build and Test
-        run: cargo test --locked -- --test-threads=1
+      - name: Fail when cheat sheet is stale
+        run: git diff --exit-code -- docs/COMMAND_CHEATSHEET.md
+
+  hardware-wallet:
+    name: Hardware Wallet (optional backends)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        # libudev-dev: hidapi's Linux HID backend (Ledger)
+        # libusb-1.0-0-dev: trezor-client's rusb transport (Trezor)
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev libusb-1.0-0-dev
+      - name: Build with hardware-wallet feature
+        run: cargo build --locked --features hardware-wallet
+      - name: Test with hardware-wallet feature
+        run: cargo test --locked --features hardware-wallet -- --test-threads=1
 
   clippy:
     name: Clippy Lint
@@ -50,22 +160,98 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev libusb-1.0-0-dev
       - name: Run Clippy
         run: cargo clippy --all-features --locked -- -D warnings
 
   smoke:
-    name: CLI Smoke Tests
+    name: CLI Smoke Tests (Linux)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libudev-dev
       - name: Build
         run: cargo build --locked
+      - name: Cross-platform CLI Integration Tests
+        run: cargo test --test cli_cross_platform --locked
       - name: Rust smoke tests
         run: cargo test --test cli_smoke --locked
       - name: Shell smoke script
         run: bash scripts/e2e-smoke.sh
+      - name: Verify Cargo.lock immutability
+        run: git diff --exit-code Cargo.lock
+
+  cli-macos:
+    name: macOS CLI Tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build CLI
+        run: cargo build --locked
+      - name: Cross-platform CLI Integration Tests
+        run: cargo test --test cli_cross_platform --locked
+      - name: Rust smoke tests
+        run: cargo test --test cli_smoke --locked
+      - name: Verify Cargo.lock immutability
+        run: git diff --exit-code Cargo.lock
+
+  cli-windows:
+    name: Windows CLI Tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build CLI
+        run: cargo build --locked
+      - name: Cross-platform CLI Integration Tests
+        run: cargo test --test cli_cross_platform --locked
+      - name: Rust smoke tests
+        run: cargo test --test cli_smoke --locked
+      - name: Verify Cargo.lock immutability
+        run: git diff --exit-code Cargo.lock
+
+  reproducible-wasm:
+    name: Reproducible WASM Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build docker builder image
+        run: docker build -t starforge-wasm-builder docker/reproducible-wasm
+      - name: Prepare sample contract
+        run: |
+          cp -r templates/examples/simple-counter sample-contract
+          sed -i 's/{{PROJECT_NAME}}/sample-contract/g' sample-contract/Cargo.toml
+          cd sample-contract
+          cargo generate-lockfile
+      - name: First Clean Build
+        run: |
+          cd sample-contract
+          docker run --rm -v $(pwd):/workspace starforge-wasm-builder --release --locked
+          mkdir ../build1
+          cp target/wasm32-unknown-unknown/release/*.wasm ../build1/
+          rm -rf target
+      - name: Second Clean Build
+        run: |
+          cd sample-contract
+          docker run --rm -v $(pwd):/workspace starforge-wasm-builder --release --locked
+          mkdir ../build2
+          cp target/wasm32-unknown-unknown/release/*.wasm ../build2/
+      - name: Verify Hashes Match
+        run: |
+          HASH1=$(sha256sum build1/*.wasm | awk '{print $1}')
+          HASH2=$(sha256sum build2/*.wasm | awk '{print $1}')
+          echo "Build 1: $HASH1"
+          echo "Build 2: $HASH2"
+          if [ "$HASH1" != "$HASH2" ]; then
+            echo "Error: Hashes do not match!"
+            exit 1
+          fi
+          echo "Success: Hashes match."

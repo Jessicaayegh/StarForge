@@ -10,7 +10,7 @@ when several StarForge processes run concurrently in the same pipeline.
 
 ## Quick start
 
-```bash
+```bash norun
 # Generated automatically; JSON logs carry it on every record.
 RUST_LOG=info starforge deploy --wasm ./token.wasm --log-format json
 
@@ -97,7 +97,7 @@ Leading and trailing whitespace is trimmed first. A value that fails validation
 is a **fatal error** (exit code `2`), not a silent fallback — generating a
 different ID would break exactly the log join the caller asked for.
 
-```
+```bash norun
 $ starforge info --correlation-id "run 12"
 Invalid correlation ID: correlation ID contains ' '; only letters, digits, '-' and '_' are allowed
 ```

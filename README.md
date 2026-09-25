@@ -1,11 +1,11 @@
-# ? starforge
+# StarForge
 
-> A developer productivity CLI for Stellar and Soroban workflows â€” built in Rust.
+**Scaffold, deploy and operate Soroban smart contracts from one fast Rust CLI:
+templates, encrypted wallets and deployment safety checks for Stellar.**
 
+[![CI](https://github.com/Nanle-code/StarForge/actions/workflows/ci.yml/badge.svg)](https://github.com/Nanle-code/StarForge/actions/workflows/ci.yml)
 ![License: MIT](https://img.shields.io/badge/License-MIT-cyan.svg)
-![Language: Rust](https://img.shields.io/badge/Language-Rust-orange.svg)
-![Network: Stellar](https://img.shields.io/badge/Network-Stellar-blue.svg)
-![Status: Active](https://img.shields.io/badge/Status-Active-green.svg)
+![Status: beta](https://img.shields.io/badge/status-beta-yellow.svg)
 ![Stellar Wave](https://img.shields.io/badge/Stellar-Wave%20Program-blueviolet.svg)
 
 ---
@@ -17,6 +17,10 @@
 Think of it as the "Hardhat or Foundry" experience for the Stellar ecosystem, built in Rust for speed and reliability.
 
 This project is actively maintained and participates in the [Stellar Wave Program](https://www.drips.network/wave/stellar) on Drips â€” a monthly open-source contribution sprint where contributors earn rewards for merged pull requests.
+
+Security architecture and trust-boundary assumptions are documented in the
+[StarForge threat model](./SECURITY_THREAT_MODEL.md). Report newly discovered
+security gaps as issues tagged `security` and include the affected boundary.
 
 ---
 
@@ -59,6 +63,55 @@ You can install the latest release binary using the installation script:
 curl -sL https://raw.githubusercontent.com/Josetic224/StarForge/main/install.sh | bash
 ```
 
+The script automatically:
+1. Detects your OS and CPU architecture
+2. Downloads the correct release archive from GitHub
+3. **Verifies the SHA-256 checksum** against the published `SHA256SUMS.txt` before extracting
+4. Installs the binary to `/usr/local/bin` (or a custom path — see below)
+5. Cleans up all temporary files on exit
+
+> **Security note**: Never pipe an untrusted script to `bash` without reviewing it first.
+> You can read [`install.sh`](./install.sh) before running it, or download the binary
+> directly from the [Releases page](https://github.com/Josetic224/StarForge/releases) and verify the checksum manually:
+>
+> ```bash
+> sha256sum -c SHA256SUMS.txt
+> ```
+
+#### Platform compatibility
+
+| OS | Architecture | Supported |
+|---|---|---|
+| Linux | x86\_64 | ✅ |
+| Linux | aarch64 | ✅ |
+| macOS | x86\_64 | ✅ |
+| macOS | aarch64 (Apple Silicon) | ✅ |
+| Windows | x86\_64 | ✅ (`.zip` from [Releases](https://github.com/Josetic224/StarForge/releases)) |
+| FreeBSD / other | — | Not supported |
+
+Windows binaries are built and smoke-tested in CI on every push and pull
+request: CI verifies that `starforge.exe` starts and that its core `--help` and
+`config doctor` surface works ([`tests/installer/windows_smoke.ps1`](tests/installer/windows_smoke.ps1)).
+The release pipeline refuses to publish a Windows binary that fails these
+checks, so a healthy download always starts on a supported Windows version.
+
+#### Custom install directory
+
+Override the default `/usr/local/bin` destination:
+
+```bash
+INSTALL_DIR="$HOME/.local/bin" \
+  curl -sL https://raw.githubusercontent.com/Josetic224/StarForge/main/install.sh | bash
+```
+
+#### Uninstall
+
+```bash
+rm -f /usr/local/bin/starforge
+# or, if you used a custom INSTALL_DIR:
+rm -f "$INSTALL_DIR/starforge"
+```
+
 ### Homebrew (macOS / Linux)
 
 A draft Homebrew formula is available for testing:
@@ -66,6 +119,52 @@ A draft Homebrew formula is available for testing:
 ```bash
 brew install Josetic224/starforge/starforge
 ```
+
+### Docker
+
+Multi-arch (`linux/amd64`, `linux/arm64`) images are published to the GitHub
+Container Registry on every tagged release, signed with build provenance
+attestation (verifiable via `gh attestation verify`):
+
+```bash
+docker pull ghcr.io/nanle-code/starforge:latest
+docker run --rm ghcr.io/nanle-code/starforge:latest --version
+
+# Or pin to a specific release:
+docker run --rm ghcr.io/nanle-code/starforge:0.1.0 --version
+```
+
+Recommended for CI: pin the tag (not `:latest`) so a build is reproducible,
+and mount a workspace directory so `starforge`'s output persists outside the
+container:
+
+```yaml
+- name: Run StarForge in CI
+  run: |
+    docker run --rm -v "$PWD:/workspace" -w /workspace \
+      ghcr.io/nanle-code/starforge:0.1.0 doctor
+```
+
+### Linux packages (.deb / .rpm)
+
+Every tagged release publishes `starforge-amd64.deb` and
+`starforge-x86_64.rpm` alongside the tarballs, built by `cargo-deb` /
+`cargo-generate-rpm` from `[package.metadata.deb]` /
+`[package.metadata.generate-rpm]` in `Cargo.toml`. Both packages install the
+binary, the top-level man page, and bash/zsh/fish completions.
+
+```bash
+# Debian / Ubuntu
+curl -LO https://github.com/Nanle-code/StarForge/releases/latest/download/starforge-amd64.deb
+sudo apt install ./starforge-amd64.deb
+
+# Fedora / RHEL
+curl -LO https://github.com/Nanle-code/StarForge/releases/latest/download/starforge-x86_64.rpm
+sudo dnf install ./starforge-x86_64.rpm
+```
+
+Verify the SHA-256 checksum against `SHA256SUMS.txt` (also published with
+every release) before installing, the same as for the tarball archives.
 
 ### Build from source
 
@@ -95,6 +194,85 @@ starforge info
 ---
 
 ## Usage
+
+### Repeatable invocation scripts
+
+Store ordered contract calls in YAML or JSON. Scripts use schema version `1`, reject unknown fields, and support `${NAME}` interpolation from the script's `env` map or the CI process environment:
+
+```yaml
+version: 1
+env:
+  CONTRACT_ID: CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+steps:
+  - name: read-state
+    contract_id: ${CONTRACT_ID}
+    function: get_value
+    wallet: ci
+    network: testnet
+    args:
+      - type: string
+        value: deployment
+    assertions:
+      - contains: ready
+  - name: write-state
+    contract_id: ${CONTRACT_ID}
+    function: set_value
+    wallet: ci
+    network: testnet
+    args:
+      - type: string
+        value: deployment
+      - type: string
+        value: ${VALUE}
+```
+
+Validate the complete sequence without contacting RPC or submitting transactions:
+
+```bash
+starforge contract invoke-script ops.yaml --dry-run
+```
+
+Run it in CI after configuring the `ci` wallet and environment variables. Steps execute sequentially, and a failed assertion stops the script:
+
+```yaml
+# .github/workflows/invoke.yml
+- name: Run contract operations
+  run: starforge contract invoke-script ops.yaml
+  env:
+    VALUE: production
+```
+
+### Stable JSON output contract
+
+Use the global `--json` flag or set `STARFORGE_OUTPUT_JSON=1` to request machine-readable output from supported commands.
+
+Every success response uses the same envelope shape:
+
+```json
+{
+  "version": 1,
+  "ok": true,
+  "data": {
+    "name": "wallet",
+    "count": 2
+  }
+}
+```
+
+Failures use a versioned error envelope:
+
+```json
+{
+  "version": 1,
+  "ok": false,
+  "error": {
+    "code": "command_error",
+    "message": "unsupported network"
+  }
+}
+```
+
+This is a global contract so automation can parse output consistently across commands without depending on per-command ad hoc schemas.
 
 ### Wallet commands
 
@@ -171,6 +349,44 @@ Common settings:
 - **network**: Set the default network (`testnet`, `mainnet`, or custom network name)
 
 For privacy information, see [Telemetry & Privacy](#telemetry--privacy).
+
+### Configuration schema migrations
+
+starforge stores its configuration in `~/.starforge/config.toml`. When a new
+release introduces a new schema version the CLI migrates the file automatically
+on first run.
+
+**What happens during a migration:**
+
+1. A timestamped backup is written **before** any change is made:
+   ```
+   ~/.starforge/config.backup.v0.1753000000.toml
+   ```
+2. Each migration step is applied in order (v0 → v1, v1 → v2, …).
+3. The updated config is persisted.
+
+If the migration fails you can manually restore from the backup:
+
+```bash
+cp ~/.starforge/config.backup.v0.<timestamp>.toml ~/.starforge/config.toml
+```
+
+**Error types and what they mean:**
+
+| Error | Cause | Fix |
+|---|---|---|
+| `Config schema version 'X' is newer than this binary supports` | Config was written by a newer `starforge` | Upgrade `starforge` |
+| `Unrecognised config schema version 'X'` | Config version field was manually edited or corrupted | Restore from backup or delete `~/.starforge/config.toml` to reset |
+| `Failed to create backup of config vX before migration` | Backup write failed (disk full, permissions) | Free disk space or fix directory permissions |
+
+**For contributors — adding a new migration step:**
+
+1. Bump `CURRENT_CONFIG_VERSION` in `src/utils/config.rs`.
+2. Add a `fn migrate_vN_to_vM(config: &mut Config)` function.
+3. Append a `ConfigMigrationStep` entry to the `MIGRATION_STEPS` slice.
+4. Add tests to `tests/config_migrations.rs` covering the new step.
+
+
 
 ### Scaffold commands
 
@@ -256,257 +472,92 @@ starforge template publish ./my-template \
 starforge template remove my-template
 ```
 
-### Deploy commands
+macOS and Linux (x86\_64, aarch64). Windows `.zip`, checksums and
+build-from-source: [installation guide](docs/INSTALL.md).
 
-```bash
-# Deploy a compiled contract
-starforge deploy --wasm target/wasm32-unknown-unknown/release/my_contract.wasm
+![StarForge demo: scaffold, deploy and invoke a Soroban contract on testnet](docs/assets/demo.gif)
 
-# Deploy to mainnet using a specific wallet
-starforge deploy \
-  --wasm target/wasm32-unknown-unknown/release/my_contract.wasm \
-  --network mainnet \
-  --wallet deployer
+<sub>A real testnet run, recorded with [`scripts/record-demo.py`](scripts/record-demo.py)
+([cast file](docs/assets/demo.cast)).</sub>
 
-# Skip confirmation prompt (for CI)
-starforge deploy --wasm ./my_contract.wasm --yes
+## 30-second tour
 
-# Optimize with soroban-optimize before deployment
-starforge deploy --wasm ./my_contract.wasm --optimize
+These commands run offline in a throwaway `HOME`, and CI executes them on
+every PR:
+
+```bash run
+starforge new contract hello              # scaffold from a template
+starforge wallet create alice             # local keypair (add --encrypt to protect it)
+starforge network show                    # testnet, mainnet, or your own
+starforge template search defi            # community templates
 ```
 
-### Contract commands
+Then deploy to testnet. StarForge works alongside
+[stellar-cli](https://developers.stellar.org/docs/tools/cli), which compiles the
+contract and signs the final transactions:
 
-```bash
-# Inspect a deployed contract instance
-starforge contract inspect CCPYZFKEAXHHS5VVW5J45TOU7S2EODJ7TZNJIA5LKDVL3PESCES6FNCI
-
-# Inspect on a specific network
-starforge contract inspect CCPYZFKEAXHHS5VVW5J45TOU7S2EODJ7TZNJIA5LKDVL3PESCES6FNCI --network mainnet
-
-# Generate typed wrappers from embedded contract metadata
-starforge contract generate-bindings ./my_contract.wasm --lang rust
-starforge contract generate-bindings ./my_contract.wasm --lang ts
+```bash norun
+cd hello && stellar contract build
+stellar keys generate deployer                          # or reuse an existing identity
+starforge wallet import --from-stellar-cli deployer     # same wallet, now in StarForge
+starforge wallet fund deployer
+starforge deploy --wasm target/wasm32v1-none/release/hello.wasm --wallet deployer --dry-run
+starforge deploy --wasm target/wasm32v1-none/release/hello.wasm --wallet deployer --yes --execute
+stellar contract invoke --id <CONTRACT_ID> --source deployer --network testnet -- hello --to Stellar
 ```
 
-### Rollback safety testing
+## Highlights
 
-```bash
-# Validate that an upgraded contract can be rolled back without losing critical state
-starforge test \
-  --wasm target/wasm32-unknown-unknown/release/my_contract_v2.wasm \
-  --rollback \
-  --previous-wasm target/wasm32-unknown-unknown/release/my_contract_v1.wasm \
-  --rollback-scenario tests/rollback/token-balances.json \
-  --rollback-performance-budget-ms 1000 \
-  --report json
-```
+| | |
+|---|---|
+| **Scaffolding** | `hello-world`, `token`, `nft` and `voting` templates, a template marketplace, and Vite + React dApp frontends. See [Usage](docs/USAGE.md#scaffold-commands). |
+| **Wallets** | Keys encrypted at rest (Argon2id + AES-256-GCM), BIP39, backups and recovery shares, Ledger/Trezor, import from stellar-cli. See [Usage](docs/USAGE.md#wallet-commands) and [wallet import security](docs/WALLET_IMPORT_SECURITY.md). |
+| **Safe deploys** | WASM validation, balance and fee simulation, dry-run plans, deploy policies, checkpoints, history and rollback. See [Deploy policy](docs/DEPLOY_POLICY.md) and [checkpoints](docs/DEPLOYMENT_CHECKPOINTS.md). |
+| **Automation** | A stable `--json` envelope, YAML invocation scripts with assertions, and non-interactive mode for CI. See [JSON stability](docs/CLI_JSON_STABILITY.md) and [Usage](docs/USAGE.md#repeatable-invocation-scripts). |
+| **Local AI (optional)** | Audit, explain and test contracts with a local Ollama model. Nothing leaves your machine. See [Offline AI](docs/OFFLINE_AI.md). |
 
-The rollback harness checks state preservation, rollback scenarios, data integrity invariants, and rollback performance budgets. See [ROLLBACK_TESTING.md](ROLLBACK_TESTING.md) for scenario schema and CI examples.
+Coming from stellar-cli? Read
+**[Migrating from stellar-cli](docs/MIGRATING_FROM_STELLAR_CLI.md)** for a
+command-by-command mapping, how to import identities, and what stellar-cli
+still does better.
 
-### Environment info
+## Documentation
 
-```bash
-starforge info
-```
+- [Installation](docs/INSTALL.md) · [Usage guide](docs/USAGE.md) · [Command reference](docs/COMMAND_REFERENCE.md) · [Cheat sheet](docs/COMMAND_CHEATSHEET.md)
+- [Configuration](docs/CONFIGURATION.md) · [Architecture](ARCHITECTURE.md) · [All documentation](docs/README.md)
+- Docs site: <https://nanle-code.github.io/StarForge/> (built from [`docs/`](docs/))
 
-### Shell completions
+## Status and stability
 
-```bash
-# Bash â€” add to ~/.bashrc
-source <(starforge completions bash)
+StarForge is **beta** (`0.x`). The core wallet, scaffold and deploy workflows
+are covered by CI on Linux, macOS and Windows. Command names and flags can
+still change between minor releases; breaking changes are listed in the
+release notes. The `--json` output envelope is versioned and stable
+([policy](docs/CLI_JSON_STABILITY.md)). Several advanced command groups
+(AI-assisted tooling, orchestration, governance) are experimental.
 
-# Zsh â€” add to ~/.zshrc
-source <(starforge completions zsh)
+## Security
 
-# Fish â€” save to fish completions directory
-starforge completions fish > ~/.config/fish/completions/starforge.fish
-```
-
-After adding the line to your shell config, restart your shell or run `source ~/.bashrc` / `source ~/.zshrc`. Tab-completion for all subcommands and flags will then be active.
-
----
-
-## Project Structure
-
-```
-starforge/
-+-- Cargo.toml
-+-- src/
-    +-- main.rs                  # CLI entry point + banner
-    +-- commands/
-    Â¦   +-- mod.rs
-    Â¦   +-- wallet.rs            # wallet create/list/show/fund/remove
-    Â¦   +-- new.rs               # project scaffolding + templates
-    Â¦   +-- contract.rs          # contract inspect + invoke
-    Â¦   +-- deploy.rs            # contract deployment
-    Â¦   +-- info.rs              # environment info
-    +-- utils/
-        +-- mod.rs
-        +-- config.rs            # ~/.starforge/config.toml read/write
-        +-- horizon.rs           # Horizon API + Friendbot HTTP calls
-        +-- soroban.rs           # Soroban RPC helpers
-        +-- print.rs             # Consistent CLI output helpers
-```
-
----
-
-## Privacy & Telemetry
-
-StarForge values your privacy.
-
-### Local-Only Telemetry Guarantee
-To help improve CLI usability, starforge collects anonymous usage telemetry (such as command names and execution times). This telemetry data is **stored purely locally** at `~/.starforge/data/telemetry.log`. **No network requests are ever made** for telemetry transmission; your telemetry data never leaves your machine.
-
-### Explicit Opt-Out Methods
-You can easily disable telemetry at any time using one of three methods:
-
-1. **Config Command:**
-   ```bash
-   starforge config set telemetry.enabled false
-   ```
-
-2. **Telemetry Subcommand:**
-   ```bash
-   starforge telemetry disable
-   ```
-
-3. **Environment Variable:**
-   Set the `STARFORGE_TELEMETRY` environment variable to `false` or `0` in your shell profile:
-   ```bash
-   export STARFORGE_TELEMETRY=false
-   ```
-
-To inspect your current telemetry status:
-```bash
-starforge telemetry status
-```
-
----
-
-
-## Configuration
-
-starforge stores all data in `~/.starforge/config.toml`:
-
-```toml
-network = "testnet"
-
-[[wallets]]
-name = "alice"
-public_key = "GABC...XYZ"
-secret_key = "SABC...XYZ"  # plaintext or encrypted (see Security section)
-network = "testnet"
-created_at = "2025-01-01T00:00:00Z"
-funded = true
-
-[networks.testnet]
-horizon_url = "https://horizon-testnet.stellar.org"
-soroban_rpc_url = "https://soroban-testnet.stellar.org"
-```
-
-### Security
-
-Secret keys can be stored **encrypted at rest** using the `--encrypt` flag during wallet creation:
-
-```bash
-starforge wallet create mykey --encrypt
-# You will be prompted to set a secure passphrase
-```
-
-Encryption uses:
-- **AES-256-GCM** for authenticated encryption
-- **Argon2** for key derivation from your passphrase
-- **Random salt and nonce** for each encryption operation
-
-When revealing an encrypted key, you must provide the correct passphrase:
-
-```bash
-starforge wallet show mykey --reveal
-# You will be prompted for the passphrase
-```
-
-Unencrypted keys (without `--encrypt`) are stored in plaintext and are suitable only for testnet or throwaway accounts. **Do not use plaintext keys on mainnet with real funds.**
-
-### Test Environment Secret
-
-Some tests validate secret-key parsing without embedding a secret in the repository. Set the value at runtime before running the test suite:
-
-```powershell
-$env:STARFORGE_TEST_SECRET_KEY = "S..."  # 56-character Stellar secret key
-cargo test
-```
-
-Generate this value outside the codebase using your preferred secure workflow, such as a local Stellar key generation command or an existing throwaway test wallet. The key should live only in your shell environment or secret manager, not in source control.
-
-### Telemetry & Privacy
-
-starforge collects **anonymous telemetry** to help us improve the CLI. **No personal data is collected** — only command names, success/failure status, and execution time.
-
-#### Disable Telemetry
-
-If you prefer not to participate:
-
-```bash
-# Permanently disable telemetry
-starforge config set telemetry false
-
-# Or use an environment variable (useful for CI/CD)
-export STARFORGE_TELEMETRY=0
-```
-
-**What's collected**: Command name, timestamp, success status, duration (milliseconds), and a random anonymous ID.
-
-**What's NOT collected**: Wallet addresses, secret keys, contract code, configuration values, error messages, or personal information.
-
-For detailed information, see [TELEMETRY_PRIVACY.md](./TELEMETRY_PRIVACY.md).
-
----
-
-| Template | Description |
-|----------|-------------|
-| `hello-world` | Basic contract with a `hello(to)` function. Great starting point. |
-| `token` | Fungible token scaffold with `initialize`, `mint`, `balance`, `transfer`. |
-| `nft` | Non-fungible token scaffold with `mint`, `owner_of`, `transfer`. |
-| `voting` | Proposal and voting contract with `create_proposal`, `vote`, `results`. |
-
-All templates include a working test suite and a README with build/deploy instructions.
-
----
+- Report vulnerabilities privately: see [SECURITY.md](SECURITY.md).
+- Trust boundaries and assumptions: [threat model](SECURITY_THREAT_MODEL.md).
+- Install only from this repository. Releases ship with `SHA256SUMS.txt`, and
+  the installer verifies it.
+- Plaintext wallets are for testnet. Use `--encrypt` or a hardware wallet for
+  real funds.
+- Telemetry is **off by default** and local-only until you opt in
+  ([details](TELEMETRY_PRIVACY.md)).
 
 ## Contributing
 
-We welcome contributions from developers of all experience levels! Whether you're fixing a bug, adding a feature, or improving documentation, your work helps the Stellar ecosystem.
+Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) and
+the [quick reference](CONTRIBUTOR_QUICK_REFERENCE.md). CI runs formatting,
+clippy, tests, canonical-link checks and the runnable docs examples
+([annotation guide](CONTRIBUTING.md#documentation-snippets)).
 
-**New contributor?** Start here: [CONTRIBUTING.md](CONTRIBUTING.md) has everything you need to get set up and submit your first PR.
+StarForge takes part in the [Stellar Wave Program](https://www.drips.network/wave/stellar)
+on Drips, where merged contributions earn rewards. Read the
+[terms](https://docs.drips.network/wave/terms-and-rules) first.
 
-**Need a quick reference?** Check out [CONTRIBUTOR_QUICK_REFERENCE.md](CONTRIBUTOR_QUICK_REFERENCE.md) for common commands and patterns.
-
-### Key Contribution Resources
-
-| Resource | What it covers |
-|----------|---|
-| [CONTRIBUTING.md](CONTRIBUTING.md) | **Full contributor guide** — setup, building, testing, PR process |
-| [CONTRIBUTOR_QUICK_REFERENCE.md](CONTRIBUTOR_QUICK_REFERENCE.md) | **Quick lookup** — common commands, project structure, troubleshooting |
-| [CI_ENFORCEMENT.md](CI_ENFORCEMENT.md) | **CI pipeline** — formatting, linting, security, and test requirements |
-| [CODE_STYLE_STANDARDS.md](CODE_STYLE_STANDARDS.md) | **Code style** — naming, documentation, linting rules, IDE setup |
-| [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md) | **Deep dive** — architecture, adding features, release process |
-
-### Quick Start
-
-1. Fork and clone the repository
-2. Follow [CONTRIBUTING.md](CONTRIBUTING.md) to set up Rust and the project
-3. Create a branch: `git checkout -b feat/issue-XXX-description`
-4. Make your changes and run `cargo test`
-5. Push and open a Pull Request with a clear description
-
-### Rewards
-
-This project participates in the **[Stellar Wave Program](https://www.drips.network/wave/stellar)** on Drips. Contributors who resolve issues during an active Wave earn Points that translate to real USDC rewards.
-
-**Read the [Terms & Rules](https://docs.drips.network/wave/terms-and-rules) before contributing.**
-
----
 ## License
 
 MIT Â© 2025 â€” See [LICENSE](./LICENSE) for details.
@@ -532,6 +583,7 @@ StarForge has comprehensive documentation covering all aspects of the project:
 - **[DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md)** - Contributing and development guide
 - **[API_REFERENCE.md](API_REFERENCE.md)** - Complete command reference
 - **[docs/COMMAND_REFERENCE.md](docs/COMMAND_REFERENCE.md)** - Navigable CLI command index
+- **[docs/COMMAND_CHEATSHEET.md](docs/COMMAND_CHEATSHEET.md)** - Auto-generated CLI command cheat sheet
 
 ### ?? Feature Documentation
 - **[TEMPLATE_MARKETPLACE.md](TEMPLATE_MARKETPLACE.md)** - Template marketplace feature
@@ -540,6 +592,9 @@ StarForge has comprehensive documentation covering all aspects of the project:
 - **[docs/CORRELATION_IDS.md](docs/CORRELATION_IDS.md)** - Correlating structured logs across one invocation
 - **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)** - Config parsing, overlay merging, and validation rules
 - **[docs/WALLET_IMPORT_SECURITY.md](docs/WALLET_IMPORT_SECURITY.md)** - Limits enforced on untrusted wallet backups
+- **[docs/DEPLOYMENT_CHECKPOINTS.md](docs/DEPLOYMENT_CHECKPOINTS.md)** - Resumable and idempotent deployment operations, session checkpointing, and staleness detection
+- **[docs/DATABASE_MIGRATIONS.md](docs/DATABASE_MIGRATIONS.md)** - SQLite schema migrations, corruption detection, backup-before-migrate, and recovery
+- **[docs/CLI_ACCESSIBILITY.md](docs/CLI_ACCESSIBILITY.md)** - `--plain` mode, `$NO_COLOR`, and screen-reader-friendly output
 - **[FUZZING_GUIDE.md](FUZZING_GUIDE.md)** - Property-based tests, fuzz targets, mutation testing
 
 ### ?? Navigation

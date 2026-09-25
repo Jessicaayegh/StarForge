@@ -2,6 +2,7 @@ pub mod ai_audit;
 pub mod ai_audit_service;
 pub mod anomaly;
 pub mod audit;
+pub mod best_practices;
 pub mod checklist;
 pub mod compliance;
 pub mod data_protection;

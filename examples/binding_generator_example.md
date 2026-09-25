@@ -17,8 +17,14 @@ The binding generator now provides:
 ### Basic Usage
 
 ```bash
-# Generate Rust bindings
+# Generate Rust bindings (stdout)
 starforge contract generate-bindings ./contract.wasm --lang rust
+
+# Generate a complete Cargo-compatible Rust client crate skeleton
+starforge contract generate-bindings ./contract.wasm --lang rust --crate-dir ./crates/my-contract-client --crate-name my-contract-client
+
+# Generate a no_std compatible WASM client crate
+starforge contract generate-bindings ./contract.wasm --lang rust --crate-dir ./crates/wasm-client --no-std
 
 # Generate TypeScript bindings  
 starforge contract generate-bindings ./contract.wasm --lang ts
@@ -29,6 +35,13 @@ starforge contract generate-bindings ./contract.wasm --lang python
 # Generate Go bindings
 starforge contract generate-bindings ./contract.wasm --lang go
 ```
+
+### Rust Client Crate Skeleton Layout & Features
+When `--crate-dir` is provided, StarForge emits a full Cargo package pinned to Soroban SDK `22.0.0`:
+- `Cargo.toml`: Package manifest with feature flags (`std`, `no_std`, `cli-backend`, `rpc-backend`, `testutils`).
+- `src/lib.rs`: Strongly typed contract methods, argument serialization, and data structs.
+- `README.md`: Crate documentation, function list, and versioning policy.
+
 
 ## Generated Code Examples
 

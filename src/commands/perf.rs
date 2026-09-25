@@ -1,7 +1,9 @@
-use crate::utils::{contract_profiler, performance as perf, print as p};
+use crate::utils::{
+    contract_profiler, notifications, perf_regression as regression, performance as perf,
+    print as p,
+};
 use anyhow::Result;
 use clap::Subcommand;
-use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -114,6 +116,123 @@ pub enum PerfCommands {
         #[arg(long, default_value = "10")]
         iterations: u32,
     },
+    /// Performance regression testing against tracked baselines
+    #[command(subcommand)]
+    Regression(RegressionCommands),
+}
+
+/// Where measurements for a regression baseline or check come from.
+#[derive(clap::Args, Debug, Clone)]
+pub struct MeasurementSource {
+    /// JSON measurements file: {"metrics": {"name": [samples...]}} or a list of
+    /// {"name", "unit", "higher_is_better", "samples"} objects
+    #[arg(long, value_name = "PATH", required_unless_present = "run")]
+    pub input: Option<PathBuf>,
+    /// Shell command to time instead of (or in addition to) --input
+    #[arg(long, value_name = "COMMAND")]
+    pub run: Option<String>,
+    /// Metric label for --run (recorded as <label>.wall_time_ms)
+    #[arg(long, default_value = "command")]
+    pub label: String,
+    /// Measured iterations for --run
+    #[arg(long, default_value_t = 5)]
+    pub iterations: u32,
+    /// Unmeasured warm-up iterations for --run
+    #[arg(long, default_value_t = 1)]
+    pub warmup: u32,
+}
+
+impl MeasurementSource {
+    fn collect(&self) -> Result<Vec<regression::MetricSamples>> {
+        let mut metrics = match &self.input {
+            Some(path) => regression::load_measurements(path)?,
+            None => Vec::new(),
+        };
+        if let Some(command) = &self.run {
+            p::info(&format!(
+                "Timing '{}' ({} warm-up + {} measured runs)",
+                command, self.warmup, self.iterations
+            ));
+            metrics.push(regression::measure_command(
+                &self.label,
+                command,
+                self.iterations,
+                self.warmup,
+            )?);
+        }
+        if metrics.is_empty() {
+            anyhow::bail!("no measurements collected; pass --input and/or --run");
+        }
+        Ok(metrics)
+    }
+}
+
+#[derive(Subcommand)]
+pub enum RegressionCommands {
+    /// Record (or update) a named performance baseline
+    Baseline {
+        /// Baseline name, e.g. main or v1.2.0
+        #[arg(long, default_value = "main")]
+        name: String,
+        #[command(flatten)]
+        source: MeasurementSource,
+        /// Baseline directory
+        #[arg(long, default_value = regression::DEFAULT_BASELINE_DIR)]
+        dir: PathBuf,
+    },
+    /// Compare measurements with a baseline; exits non-zero on regressions
+    Check {
+        /// Baseline to compare against
+        #[arg(long, default_value = "main")]
+        baseline: String,
+        #[command(flatten)]
+        source: MeasurementSource,
+        /// Baseline directory
+        #[arg(long, default_value = regression::DEFAULT_BASELINE_DIR)]
+        dir: PathBuf,
+        /// Worsening percent that produces a warning
+        #[arg(long, default_value_t = 5.0)]
+        warn_pct: f64,
+        /// Worsening percent that counts as a regression
+        #[arg(long, default_value_t = 10.0)]
+        fail_pct: f64,
+        /// Per-metric regression threshold as metric=percent (repeatable)
+        #[arg(long = "metric-threshold", value_name = "METRIC=PCT")]
+        metric_thresholds: Vec<String>,
+        /// Ignore changes within this many baseline standard deviations
+        #[arg(long, default_value_t = 2.0)]
+        noise_sigma: f64,
+        /// Exit non-zero on: regression, warning, or never
+        #[arg(long, default_value = "regression", value_parser = ["regression", "warning", "never"])]
+        fail_on: String,
+        /// Report format
+        #[arg(long, default_value = "text", value_parser = ["text", "markdown", "json"])]
+        format: String,
+        /// Write the report to a file instead of stdout
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Send regression alerts to configured notification channels
+        #[arg(long)]
+        notify: bool,
+        /// Replace the baseline with these measurements when the check passes
+        #[arg(long)]
+        update_baseline: bool,
+    },
+    /// Show how a baseline's metrics evolved across recorded versions
+    History {
+        /// Baseline name
+        #[arg(long, default_value = "main")]
+        name: String,
+        /// Baseline directory
+        #[arg(long, default_value = regression::DEFAULT_BASELINE_DIR)]
+        dir: PathBuf,
+    },
+    /// List stored baselines
+    List {
+        /// Baseline directory
+        #[arg(long, default_value = regression::DEFAULT_BASELINE_DIR)]
+        dir: PathBuf,
+    },
 }
 
 pub async fn handle(cmd: PerfCommands) -> Result<()> {
@@ -159,6 +278,139 @@ pub async fn handle(cmd: PerfCommands) -> Result<()> {
             contract,
             iterations,
         } => benchmark(contract, iterations),
+        PerfCommands::Regression(cmd) => handle_regression(cmd),
+    }
+}
+
+// ── Regression Testing ───────────────────────────────────────────────────────
+
+fn handle_regression(cmd: RegressionCommands) -> Result<()> {
+    match cmd {
+        RegressionCommands::Baseline { name, source, dir } => {
+            let metrics = source.collect()?;
+            let baseline = regression::PerfBaseline::from_measurements(&name, &metrics)?;
+            let path = regression::BaselineStore::new(dir).save(&baseline)?;
+            p::success(&format!(
+                "Recorded baseline '{}' with {} metric(s)",
+                name,
+                baseline.metrics.len()
+            ));
+            p::kv("Path", &path.display().to_string());
+            if let Some(commit) = &baseline.git_commit {
+                p::kv("Commit", commit);
+            }
+            Ok(())
+        }
+        RegressionCommands::Check {
+            baseline,
+            source,
+            dir,
+            warn_pct,
+            fail_pct,
+            metric_thresholds,
+            noise_sigma,
+            fail_on,
+            format,
+            output,
+            notify,
+            update_baseline,
+        } => {
+            let store = regression::BaselineStore::new(dir);
+            let stored = store.load(&baseline)?;
+            let metrics = source.collect()?;
+            let policy = regression::RegressionPolicy {
+                warn_pct,
+                fail_pct,
+                noise_sigma,
+                ..Default::default()
+            }
+            .with_metric_overrides(&metric_thresholds)?;
+            let fail_on = regression::FailOn::parse(&fail_on)?;
+            let report = regression::compare(&stored, &metrics, &policy)?;
+            let rendered = report.render(regression::ReportFormat::parse(&format)?)?;
+
+            match &output {
+                Some(path) => {
+                    std::fs::write(path, &rendered)?;
+                    p::info(&format!("Report written to {}", path.display()));
+                }
+                None => println!("{}", rendered),
+            }
+
+            if notify {
+                for alert in &report.alerts {
+                    let data = HashMap::from([
+                        ("message".to_string(), alert.message.clone()),
+                        ("metric".to_string(), alert.metric.clone()),
+                        ("baseline".to_string(), report.baseline.clone()),
+                    ]);
+                    if let Err(err) = notifications::send_notification(
+                        "perf_regression_alert",
+                        &data,
+                        &alert.severity,
+                    ) {
+                        p::warn(&format!("Alert notification failed: {}", err));
+                    }
+                }
+            }
+
+            if fail_on.should_fail(report.verdict) {
+                anyhow::bail!(
+                    "performance regression check {} against baseline '{}' ({} regressed, {} warning, {} missing)",
+                    report.verdict.label(),
+                    report.baseline,
+                    report.summary.regressed,
+                    report.summary.warnings,
+                    report.summary.missing
+                );
+            }
+
+            if update_baseline && report.verdict != regression::Verdict::Fail {
+                let updated = regression::PerfBaseline::from_measurements(&baseline, &metrics)?;
+                store.save(&updated)?;
+                p::success(&format!("Baseline '{}' updated", baseline));
+            }
+            Ok(())
+        }
+        RegressionCommands::History { name, dir } => {
+            let history = regression::BaselineStore::new(dir).history(&name)?;
+            if history.is_empty() {
+                p::info(&format!("No history recorded for baseline '{}'", name));
+                return Ok(());
+            }
+            p::header(&format!("Baseline History: {}", name));
+            p::kv("Versions", &history.len().to_string());
+            for (metric, points) in regression::baseline_trends(&history) {
+                println!();
+                p::kv("Metric", &metric);
+                let rows: Vec<Vec<String>> = points
+                    .iter()
+                    .map(|point| {
+                        vec![
+                            point.created_at.clone(),
+                            point.git_commit.clone().unwrap_or_else(|| "-".to_string()),
+                            point
+                                .mean
+                                .map(|m| format!("{:.2}", m))
+                                .unwrap_or_else(|| "-".to_string()),
+                        ]
+                    })
+                    .collect();
+                p::table(&["Recorded", "Commit", "Mean"], &rows);
+            }
+            Ok(())
+        }
+        RegressionCommands::List { dir } => {
+            let store = regression::BaselineStore::new(dir);
+            let names = store.list()?;
+            if names.is_empty() {
+                p::info(&format!("No baselines in {}", store.dir().display()));
+            }
+            for name in names {
+                println!("{}", name);
+            }
+            Ok(())
+        }
     }
 }
 
@@ -535,6 +787,12 @@ fn generate_dashboard(contract: String, network: String) -> Result<()> {
         "Avg Execution Time",
         &format!("{:.1}ms", dashboard.summary.avg_execution_time_ms),
     );
+    if let Some(avg_mem) = dashboard.summary.avg_memory_used_bytes {
+        p::kv("Avg Memory Used", &format!("{:.0} bytes", avg_mem));
+    }
+    if let Some(max_mem) = dashboard.summary.max_memory_used_bytes {
+        p::kv("Peak Memory Used", &format!("{:.0} bytes", max_mem));
+    }
     p::kv(
         "Success Rate",
         &format!("{:.1}%", dashboard.summary.success_rate),
@@ -713,6 +971,12 @@ fn dashboard(contract: String, network: String) -> Result<()> {
         "Avg Execution Time",
         &format!("{:.2}ms", report.summary.avg_execution_time_ms),
     );
+    if let Some(avg_mem) = report.summary.avg_memory_used_bytes {
+        p::kv("Avg Memory Used", &format!("{:.0} bytes", avg_mem));
+    }
+    if let Some(max_mem) = report.summary.max_memory_used_bytes {
+        p::kv("Peak Memory Used", &format!("{:.0} bytes", max_mem));
+    }
     p::kv(
         "Success Rate",
         &format!("{:.1}%", report.summary.success_rate),
@@ -872,6 +1136,12 @@ fn report(contract: String, network: String) -> Result<()> {
         "Avg Execution Time",
         &format!("{:.2}ms", report.summary.avg_execution_time_ms),
     );
+    if let Some(avg_mem) = report.summary.avg_memory_used_bytes {
+        p::kv("Avg Memory Used", &format!("{:.0} bytes", avg_mem));
+    }
+    if let Some(max_mem) = report.summary.max_memory_used_bytes {
+        p::kv("Peak Memory Used", &format!("{:.0} bytes", max_mem));
+    }
     p::kv(
         "Success Rate",
         &format!("{:.1}%", report.summary.success_rate),

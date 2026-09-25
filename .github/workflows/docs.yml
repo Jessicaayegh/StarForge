@@ -1,0 +1,97 @@
+name: Docs
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Every shell block in README.md and docs/ must be annotated `run` or
+  # `norun`; `run` blocks are executed against the freshly built binary in a
+  # temporary HOME. See CONTRIBUTING.md#documentation-snippets.
+  snippets:
+    name: Docs Snippets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - name: Check snippet annotations
+        run: python3 scripts/docs-snippets.py --lint-only
+      - name: Build starforge
+        run: cargo build --locked
+      - name: Run documentation snippets
+        run: python3 scripts/docs-snippets.py
+
+  # `run local` snippets need a Stellar network; run them against a local
+  # quickstart node so they never depend on testnet availability.
+  snippets-local-network:
+    name: Docs Snippets (local network)
+    runs-on: ubuntu-latest
+    services:
+      stellar:
+        image: stellar/quickstart:latest
+        ports:
+          - 8000:8000
+        options: >-
+          --health-cmd "curl -sf -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getHealth\"}' http://localhost:8000/rpc"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
+        env:
+          NETWORK: local
+          ENABLE_SOROBAN_RPC: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - name: Build starforge
+        run: cargo build --locked
+      - name: Wait for Friendbot
+        run: |
+          for _ in $(seq 1 60); do
+            curl -sf "http://localhost:8000/friendbot?addr=GDRXE2BQUC3AZNPVFSCEZ76NJ3WWL25FYFK6RGZGIEKWE4SOOHSUJUJ6" >/dev/null && exit 0
+            sleep 5
+          done
+          echo "friendbot did not become ready" >&2
+          exit 1
+      - name: Run documentation snippets that need a network
+        run: python3 scripts/docs-snippets.py --local-network
+
+  site:
+    name: Docs Site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mdBook
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL https://github.com/rust-lang/mdBook/releases/download/v0.5.4/mdbook-v0.5.4-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xz -C "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Build site
+        run: mdbook build docs
+      - uses: actions/upload-pages-artifact@v3
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        with:
+          path: target/docs-site
+
+  deploy-site:
+    name: Publish Docs Site
+    needs: [snippets, site]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master' && github.repository == 'Nanle-code/StarForge'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

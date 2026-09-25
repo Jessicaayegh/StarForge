@@ -7,7 +7,6 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fmt;
 use std::sync::Mutex;
 
 // ── Deterministic Configuration ───────────────────────────────────────────────
@@ -236,7 +235,7 @@ mod tests {
         let rng = SeededRng::new(123);
         for _ in 0..100 {
             let p = rng.probability();
-            assert!(p >= 0.0 && p <= 1.0);
+            assert!((0.0..=1.0).contains(&p));
         }
     }
 

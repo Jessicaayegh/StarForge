@@ -1,0 +1,11 @@
+package starforge:plugin@0.1.0;
+
+/// Minimal, portable contract for sandboxed plugins. Capabilities are granted
+/// by the host; a component never receives ambient filesystem or network APIs.
+interface plugin {
+  run: func(args: list<string>) -> result<string, string>;
+}
+
+world starforge-plugin {
+  export plugin;
+}

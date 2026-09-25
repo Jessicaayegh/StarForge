@@ -5,7 +5,7 @@ A practical guide to writing cheaper, faster Soroban contracts, and to using
 
 ## Using the analyzer
 
-```bash
+```bash norun
 # Profile a single contract
 starforge gas analyze ./target/wasm32-unknown-unknown/release/my_contract.wasm
 

@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -279,7 +278,33 @@ pub struct DataGenerator {
     pub description: String,
 }
 
-// ─── Analysis functions ────────────────────────────────────────────────────────
+pub fn extract_contract_struct_name(source: &str) -> Option<String> {
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("pub struct ") || trimmed.starts_with("struct ") {
+            let rest = if trimmed.starts_with("pub struct ") {
+                &trimmed["pub struct ".len()..]
+            } else {
+                &trimmed["struct ".len()..]
+            };
+            let name = rest
+                .split([' ', '{', ';', '<', '('])
+                .next()
+                .unwrap_or("")
+                .trim();
+            if !name.is_empty() && name != "DataKey" && name != "Error" && name != "ContractError" {
+                return Some(name.to_string());
+            }
+        } else if trimmed.starts_with("impl ") && !trimmed.contains(" for ") {
+            let rest = &trimmed["impl ".len()..];
+            let name = rest.split([' ', '{', '<']).next().unwrap_or("").trim();
+            if !name.is_empty() && name != "DataKey" && name != "Error" && name != "ContractError" {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
 
 pub fn analyze_contract_for_testing(source: &str) -> Result<ContractAnalysis> {
     let functions = extract_functions_with_signatures(source);
@@ -293,6 +318,7 @@ pub fn analyze_contract_for_testing(source: &str) -> Result<ContractAnalysis> {
         functions: Vec::new(),
         storage_accesses: Vec::new(),
         external_calls: Vec::new(),
+        contract_struct_name: extract_contract_struct_name(source),
     };
 
     for func in &functions {
@@ -319,6 +345,129 @@ pub fn analyze_contract_for_testing(source: &str) -> Result<ContractAnalysis> {
     Ok(analysis)
 }
 
+/// Edge cases worth covering for one function, derived from its parameters
+/// and whether it mutates state.
+pub fn generate_edge_case_descriptions(func: &FunctionInfo) -> Vec<String> {
+    let mut cases = Vec::new();
+
+    for param in &func.params {
+        let name = &param.name;
+        let ty = param.param_type.as_str();
+        if ty.contains("Address") {
+            cases.push(format!("Zero address passed as '{}'", name));
+            cases.push(format!("Self-referencing address passed as '{}'", name));
+        } else if ty.contains("u64")
+            || ty.contains("i64")
+            || ty.contains("u32")
+            || ty.contains("i32")
+        {
+            cases.push(format!("Zero (0) passed as '{}'", name));
+            cases.push(format!("Maximum value for the type of '{}'", name));
+        } else if ty.contains("String") || ty.contains("string") {
+            cases.push(format!("Empty string passed as '{}'", name));
+            cases.push(format!("Maximum length string passed as '{}'", name));
+        } else if ty.contains("Vec") || ty.contains("Map") {
+            cases.push(format!("Empty collection passed as '{}'", name));
+        }
+    }
+
+    if func.is_public || func.is_entry_point {
+        cases.push(format!("Unauthorized caller invoking '{}'", func.name));
+    }
+    if func.is_mutating {
+        cases.push(format!(
+            "Repeated invocation of '{}' (idempotency)",
+            func.name
+        ));
+    }
+
+    cases
+}
+
+/// Security properties a generated test suite should assert for one function.
+pub fn generate_security_checks(func: &FunctionInfo) -> Vec<String> {
+    let mut checks = Vec::new();
+
+    if func.is_mutating || func.is_entry_point {
+        checks.push(format!(
+            "Authorization: '{}' calls require_auth() before mutating state",
+            func.name
+        ));
+    }
+
+    for param in &func.params {
+        let ty = param.param_type.as_str();
+        if ty.contains("u64") || ty.contains("i64") || ty.contains("u32") || ty.contains("i32") {
+            checks.push(format!(
+                "Overflow: arithmetic on '{}' is checked rather than wrapping",
+                param.name
+            ));
+        }
+        if ty.contains("Address") {
+            checks.push(format!(
+                "Address validation: '{}' is rejected when it is not an expected participant",
+                param.name
+            ));
+        }
+    }
+
+    if func.is_mutating {
+        checks.push(format!(
+            "State consistency: a failing '{}' leaves storage unchanged",
+            func.name
+        ));
+    }
+
+    checks
+}
+
+/// Risks in a contract that a test suite alone cannot resolve, surfaced
+/// alongside generated tests.
+pub fn generate_warnings(analysis: &ContractAnalysis) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    if analysis.total_functions == 0 {
+        warnings.push(
+            "No functions were found in the contract; nothing could be generated.".to_string(),
+        );
+        return warnings;
+    }
+
+    if analysis.complex_functions > 0 {
+        warnings.push(format!(
+            "{} function(s) are highly branched; generated tests are unlikely to cover every path.",
+            analysis.complex_functions
+        ));
+    }
+    if analysis.public_functions > 5 {
+        warnings.push(format!(
+            "{} public functions form a large external surface; review authorization on each.",
+            analysis.public_functions
+        ));
+    }
+    if analysis.storage_accesses.len() > 3 {
+        warnings.push(format!(
+            "{} storage access(es) detected; assert persisted state as well as return values.",
+            analysis.storage_accesses.len()
+        ));
+    }
+    if !analysis.external_calls.is_empty() {
+        warnings.push(format!(
+            "{} external call(s) detected; these need mocks to be tested deterministically.",
+            analysis.external_calls.len()
+        ));
+    }
+    if analysis.mutating_functions > 0 && analysis.entry_points == 0 {
+        warnings.push(
+            "State-mutating functions were found but no contract entry points; \
+             confirm the contract is annotated with #[contractimpl]."
+                .to_string(),
+        );
+    }
+
+    warnings
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContractAnalysis {
     pub total_functions: u32,
@@ -330,6 +479,8 @@ pub struct ContractAnalysis {
     pub functions: Vec<FunctionInfo>,
     pub storage_accesses: Vec<String>,
     pub external_calls: Vec<String>,
+    #[serde(default)]
+    pub contract_struct_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -356,32 +507,65 @@ pub struct ParamInfo {
 
 fn extract_functions_with_signatures(source: &str) -> Vec<FunctionInfo> {
     let mut functions = Vec::new();
-    let mut current_line = 1u32;
     let mut in_function = false;
     let mut brace_depth = 0u32;
+    let mut body_lines: Vec<&str> = Vec::new();
 
-    for line in source.lines() {
+    for (current_line, line) in (1u32..).zip(source.lines()) {
         let trimmed = line.trim();
 
         if !in_function {
-            if let Some(func) = parse_function_line(trimmed, current_line) {
-                in_function = true;
-                brace_depth = 0;
-                functions.push(func);
+            if let Some(mut func) = parse_function_line(trimmed, current_line) {
+                let open_braces = trimmed.matches('{').count();
+                let close_braces = trimmed.matches('}').count();
+                if open_braces > 0 && open_braces == close_braces {
+                    if body_mutates_state(trimmed) {
+                        func.is_mutating = true;
+                    }
+                    func.complexity_score = calculate_complexity(trimmed);
+                    functions.push(func);
+                } else {
+                    in_function = true;
+                    brace_depth = open_braces as u32;
+                    brace_depth = brace_depth.saturating_sub(close_braces as u32);
+                    body_lines.clear();
+                    body_lines.push(trimmed);
+                    functions.push(func);
+                }
             }
         } else {
+            body_lines.push(trimmed);
             brace_depth += trimmed.matches('{').count() as u32;
             brace_depth = brace_depth.saturating_sub(trimmed.matches('}').count() as u32);
-            if brace_depth == 0 && (trimmed.contains('}') || trimmed.ends_with('}')) {
+            if brace_depth == 0 {
                 if let Some(last) = functions.last_mut() {
                     last.line_end = current_line;
+                    let body = body_lines.join("\n");
+                    if body_mutates_state(&body) {
+                        last.is_mutating = true;
+                    }
+                    last.complexity_score = calculate_complexity(&body);
                 }
                 in_function = false;
             }
         }
-        current_line += 1;
     }
     functions
+}
+
+/// Detects state mutation in a function body: the classic `&mut self`
+/// pattern, Soroban's storage-write pattern (`env.storage()....set/remove/
+/// bump/extend_ttl(...)`), or a `require_auth()` call — Soroban view
+/// functions don't authorize callers, so requiring auth implies the function
+/// changes state even when the write itself is elsewhere (e.g. a helper).
+fn body_mutates_state(body: &str) -> bool {
+    body.contains("mut self")
+        || body.contains("require_auth(")
+        || (body.contains(".storage()")
+            && (body.contains(".set(")
+                || body.contains(".remove(")
+                || body.contains(".bump(")
+                || body.contains(".extend_ttl(")))
 }
 
 fn parse_function_line(line: &str, line_num: u32) -> Option<FunctionInfo> {
@@ -406,7 +590,16 @@ fn parse_function_line(line: &str, line_num: u32) -> Option<FunctionInfo> {
         .split(',')
         .filter_map(|p| {
             let p = p.trim();
-            if p.is_empty() || p == "env" || p == "&self" || p == "&mut self" {
+            if p.is_empty()
+                || p == "env"
+                || p.starts_with("env:")
+                || p.starts_with("env :")
+                || p.starts_with("&env")
+                || p.starts_with("&mut env")
+                || p == "&self"
+                || p == "&mut self"
+                || p == "self"
+            {
                 return None;
             }
             let is_mut = p.contains("mut ");
@@ -434,7 +627,22 @@ fn parse_function_line(line: &str, line_num: u32) -> Option<FunctionInfo> {
         })
         .collect();
 
-    let is_mutating = line.contains("mut self") || line.contains("&mut self");
+    // Soroban contract functions mutate ledger state through `env`, never
+    // through `&mut self`, so the signature has to carry the signal: a function
+    // that returns nothing exists for its effects, and the conventional
+    // state-changing verbs name the rest. `&mut self` still counts, for plain
+    // Rust code.
+    const MUTATING_VERBS: &[&str] = &[
+        "set", "add", "remove", "delete", "update", "create", "init", "transfer", "mint", "burn",
+        "approve", "deposit", "withdraw", "stake", "unstake", "claim", "vote", "execute",
+        "upgrade", "write",
+    ];
+    let lower_name = name.to_lowercase();
+    let is_mutating = line.contains("mut self")
+        || !rest.contains("->")
+        || MUTATING_VERBS
+            .iter()
+            .any(|verb| lower_name.starts_with(verb));
     let complexity = calculate_complexity(line);
 
     let return_type = if let Some(arrow_pos) = rest.find("->") {
@@ -445,11 +653,13 @@ fn parse_function_line(line: &str, line_num: u32) -> Option<FunctionInfo> {
         None
     };
 
+    let is_entry_point = is_entry_point || name == "initialize" || name == "init";
+
     Some(FunctionInfo {
         name,
         signature: line.trim().to_string(),
-        is_public: is_public,
-        is_entry_point: is_entry_point,
+        is_public,
+        is_entry_point,
         is_mutating,
         params,
         return_type,
@@ -489,11 +699,14 @@ fn extract_storage_accesses(source: &str) -> Vec<String> {
     let mut accesses = Vec::new();
     for line in source.lines() {
         let trimmed = line.trim();
-        if trimmed.contains(".set(") || trimmed.contains(".get(") || trimmed.contains(".has(") {
-            if let Some(key) = trimmed.split('(').nth(1) {
-                let key = key.trim_end_matches(')').trim().to_string();
-                if !key.is_empty() && !accesses.contains(&key) {
-                    accesses.push(key);
+        for marker in &[".set(", ".get(", ".has("] {
+            if let Some(idx) = trimmed.find(marker) {
+                let rest = &trimmed[idx + marker.len()..];
+                if let Some(end_idx) = rest.find(')') {
+                    let key = rest[..end_idx].trim().to_string();
+                    if !key.is_empty() && !accesses.contains(&key) {
+                        accesses.push(key);
+                    }
                 }
             }
         }
@@ -519,11 +732,9 @@ pub fn generate_test_priorities(analysis: &ContractAnalysis) -> Vec<TestPriority
     for func in &analysis.functions {
         let priority = if func.is_entry_point {
             TestPriority::Critical
-        } else if func.is_mutating && func.complexity_score > 3 {
+        } else if func.is_mutating {
             TestPriority::High
         } else if func.complexity_score > 5 {
-            TestPriority::High
-        } else if func.is_mutating {
             TestPriority::Medium
         } else {
             TestPriority::Low
@@ -1095,7 +1306,7 @@ pub fn find_test_files(project_path: &Path) -> Vec<PathBuf> {
         if let Ok(entries) = fs::read_dir(&tests_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |ext| ext == "rs") {
+                if path.extension().is_some_and(|ext| ext == "rs") {
                     test_files.push(path);
                 }
             }
@@ -1108,7 +1319,7 @@ pub fn find_test_files(project_path: &Path) -> Vec<PathBuf> {
         if let Ok(entries) = fs::read_dir(&src_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |ext| ext == "rs") {
+                if path.extension().is_some_and(|ext| ext == "rs") {
                     if let Ok(content) = fs::read_to_string(&path) {
                         if content.contains("#[cfg(test)]") {
                             test_files.push(path);
@@ -1295,6 +1506,7 @@ mod tests {
             ],
             storage_accesses: vec![],
             external_calls: vec![],
+            contract_struct_name: None,
         };
 
         let priorities = generate_test_priorities(&analysis);

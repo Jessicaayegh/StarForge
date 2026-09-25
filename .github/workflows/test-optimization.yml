@@ -28,6 +28,9 @@ on:
         required: false
         default: 'html'
 
+permissions:
+  contents: read
+
 concurrency:
   group: test-optimization-${{ github.ref }}
   cancel-in-progress: true
@@ -87,21 +90,21 @@ jobs:
 
       - name: Run tests with timing
         run: |
-          cargo test --locked -- -Z unstable-options --report-time 2>&1 | tee test_timing.txt
+          cargo test --locked 2>&1 | while IFS= read -r line; do echo "[$(date +%H:%M:%S)] $line"; done | tee test_timing.txt
 
       - name: Analyze test durations
         run: |
-          echo "## Test Duration Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "## Test Duration Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Metric | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
           total_tests=$(grep -c "test result:" test_timing.txt || true)
-          echo "| Total Tests | $total_tests |" >> $GITHUB_STEP_SUMMARY
+          echo "| Total Tests | $total_tests |" >> "$GITHUB_STEP_SUMMARY"
           passed=$(grep -oP '\d+(?= passed)' test_timing.txt | tail -1 || echo "0")
-          echo "| Passed | $passed |" >> $GITHUB_STEP_SUMMARY
+          echo "| Passed | $passed |" >> "$GITHUB_STEP_SUMMARY"
           failed=$(grep -oP '\d+(?= failed)' test_timing.txt | tail -1 || echo "0")
-          echo "| Failed | $failed |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Failed | $failed |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload test timing data
         if: always()
@@ -136,13 +139,13 @@ jobs:
 
       - name: Analyze flaky tests
         run: |
-          echo "## Flaky Test Report" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Tests that failed intermittently across 3 runs:" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Flaky Test Report" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Tests that failed intermittently across 3 runs:" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
           grep "FAILED" flaky_results.txt | sort -u || echo "No flaky tests detected"
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "_Run weekly or on-demand via workflow_dispatch_" >> $GITHUB_STEP_SUMMARY
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "_Run weekly or on-demand via workflow_dispatch_" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload flaky test report
         if: always()
@@ -162,11 +165,11 @@ jobs:
     steps:
       - name: Print summary
         run: |
-          echo "## AI Test Optimization Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Jobs Completed" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **Test Optimization**: ${{ needs.optimize.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Performance Analysis**: ${{ needs.performance.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Artifacts from this run contain optimization reports and timing data." >> $GITHUB_STEP_SUMMARY
+          echo "## AI Test Optimization Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Jobs Completed" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Test Optimization**: ${{ needs.optimize.result }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Performance Analysis**: ${{ needs.performance.result }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Artifacts from this run contain optimization reports and timing data." >> "$GITHUB_STEP_SUMMARY"
