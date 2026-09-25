@@ -35,6 +35,7 @@ function serializeTemplate(tpl: ITemplate) {
     repository: tpl.repository,
     homepage: tpl.homepage,
     documentation: tpl.documentation,
+    readme: tpl.readme || tpl.documentation || "",
     downloads: tpl.downloads,
     verified: tpl.verified,
     created_at: tpl.createdAt,
@@ -400,6 +401,40 @@ router.get(
   },
 );
 
+// Public publisher profile used by the registry portal.
+router.get(
+  "/publishers/:publisher",
+  optionalAuth,
+  async (req: Request, res: Response) => {
+    try {
+      const publisher = decodeURIComponent(req.params.publisher).toLowerCase();
+      const templates = (await templateStore.all()).filter(
+        (tpl) => tpl.author.toLowerCase() === publisher || tpl.publisherId.toLowerCase() === publisher,
+      );
+      if (templates.length === 0) {
+        return res.status(404).json({ error: "Publisher not found" });
+      }
+      const latestByName = new Map<string, ITemplate>();
+      for (const template of templates) {
+        const current = latestByName.get(template.name);
+        if (!current || new Date(template.createdAt) > new Date(current.createdAt)) {
+          latestByName.set(template.name, template);
+        }
+      }
+      res.json({
+        success: true,
+        publisher: templates[0].author,
+        template_count: latestByName.size,
+        total_downloads: templates.reduce((sum, tpl) => sum + tpl.downloads, 0),
+        templates: [...latestByName.values()].map(serializeTemplate),
+      });
+    } catch (err) {
+      logger.error("Publisher profile error", err);
+      res.status(500).json({ error: "Failed to fetch publisher profile" });
+    }
+  },
+);
+
 // Transfer template ownership
 router.post(
   "/:name/transfer-ownership",
@@ -478,6 +513,34 @@ router.post(
 
 // Get template by name and version
 router.get(
+  "/:name",
+  optionalAuth,
+  async (req: Request, res: Response) => {
+    try {
+      const versions = await templateStore.findByName(req.params.name);
+      if (versions.length === 0) {
+        return res.status(404).json({ error: "Template not found" });
+      }
+      const latest = versions[0];
+      searchAnalytics.recordInteraction(req.userId, latest.id, "view");
+      res.json({
+        success: true,
+        template: serializeTemplate(latest),
+        versions: versions.map((version) => ({
+          version: version.version,
+          created_at: version.createdAt,
+          downloads: version.downloads,
+          download_url: version.downloadUrl,
+        })),
+      });
+    } catch (err) {
+      logger.error("Template versions error", err);
+      res.status(500).json({ error: "Failed to fetch template versions" });
+    }
+  },
+);
+
+router.get(
   "/:name/:version",
   optionalAuth,
   async (req: Request, res: Response) => {
@@ -519,6 +582,7 @@ router.post("/publish", verifyToken, mutationRateLimiter, async (req: Request, r
       repository,
       homepage,
       documentation,
+      readme,
       content,
     } = req.body;
 
@@ -568,6 +632,7 @@ router.post("/publish", verifyToken, mutationRateLimiter, async (req: Request, r
       repository,
       homepage,
       documentation,
+      readme,
       downloads: 0,
       verified: false,
       publisherId: req.userId,
