@@ -316,7 +316,7 @@ async fn template_assist(
     let template_path = if direct.is_dir() {
         direct
     } else {
-        let entry = templates::get_template(&template).await.context(|| {
+        let entry = templates::get_template(&template).await.with_context(|| {
             format!(
                 "Template '{}' was not found. Pass a directory or run `starforge template list`.",
                 template
@@ -346,7 +346,7 @@ async fn template_assist(
     };
     if let Some(path) = output {
         std::fs::write(&path, rendered)
-            .context(|| format!("Failed to write {}", path.display()))?;
+            .with_context(|| format!("Failed to write {}", path.display()))?;
         p::success(&format!("Integration report written to {}", path.display()));
     } else {
         println!("{rendered}");
