@@ -929,23 +929,30 @@ fn builtin_knowledge_base() -> Vec<DocChunk> {
 // ─── Answer generation ───────────────────────────────────────────────────────
 
 /// A citation linking an answer back to the indexed documentation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Citation {
     pub source: String,
     pub title: String,
     pub url: Option<String>,
     pub kind: SourceKind,
     pub snippet: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub section_anchor: Option<String>,
+    #[serde(default)]
+    pub confidence_score: f64,
 }
 
 /// A complete answer produced by the Q&A engine.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QaAnswer {
     pub question: String,
     pub answer: String,
     pub citations: Vec<Citation>,
     pub language: QaLanguage,
     pub confidence: f64,
+    pub is_low_confidence: bool,
     pub mode: AnswerMode,
     pub follow_up_suggestions: Vec<String>,
     pub latency_ms: u128,
@@ -1177,6 +1184,7 @@ impl DocQaEngine {
                     citations: citations_from_hits(&hits),
                     language: answer_language,
                     confidence: estimate_confidence(&hits, &analysis),
+                    is_low_confidence: estimate_confidence(&hits, &analysis) < 0.60 || hits.is_empty(),
                     mode: AnswerMode::Generated,
                     follow_up_suggestions: follow_up_suggestions(question, &analysis),
                     latency_ms: started.elapsed().as_millis(),
@@ -1279,15 +1287,75 @@ source inline like [1], [2], etc. If the context does not contain the answer, sa
     prompt
 }
 
+/// Generate anchor slug from a section title.
+pub fn slugify_anchor(title: &str) -> String {
+    let clean: String = title
+        .trim()
+        .trim_start_matches('#')
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let mut collapsed = String::new();
+    let mut last_dash = false;
+    for c in clean.chars() {
+        if c == '-' {
+            if !last_dash {
+                collapsed.push(c);
+                last_dash = true;
+            }
+        } else {
+            collapsed.push(c);
+            last_dash = false;
+        }
+    }
+    let trimmed = collapsed.trim_matches('-');
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!("#{}", trimmed)
+    }
+}
+
+/// Extract file path if the source is a file reference.
+pub fn extract_file_path(source: &str) -> Option<String> {
+    if source.ends_with(".md")
+        || source.ends_with(".rs")
+        || source.ends_with(".toml")
+        || source.ends_with(".json")
+        || source.contains('/')
+        || source.contains('\\')
+    {
+        Some(source.to_string())
+    } else {
+        None
+    }
+}
+
 /// Build citations from the retrieved hits used in the prompt.
-fn citations_from_hits(hits: &[SearchHit]) -> Vec<Citation> {
+pub fn citations_from_hits(hits: &[SearchHit]) -> Vec<Citation> {
     hits.iter()
-        .map(|hit| Citation {
-            source: hit.chunk.source.clone(),
-            title: hit.chunk.title.clone(),
-            url: hit.chunk.url.clone(),
-            kind: hit.chunk.kind,
-            snippet: truncate_snippet(&hit.chunk.content),
+        .map(|hit| {
+            let anchor = slugify_anchor(&hit.chunk.title);
+            let section_anchor = if anchor.is_empty() { None } else { Some(anchor) };
+            let file_path = extract_file_path(&hit.chunk.source);
+            let confidence_score = (hit.score / 10.0).clamp(0.0, 1.0);
+            Citation {
+                source: hit.chunk.source.clone(),
+                title: hit.chunk.title.clone(),
+                url: hit.chunk.url.clone(),
+                kind: hit.chunk.kind,
+                snippet: truncate_snippet(&hit.chunk.content),
+                file_path,
+                section_anchor,
+                confidence_score,
+            }
         })
         .collect()
 }
@@ -1326,6 +1394,7 @@ for full generated answers.",
         citations: citations_from_hits(hits),
         language,
         confidence: estimate_confidence(hits, &analysis),
+        is_low_confidence: estimate_confidence(hits, &analysis) < 0.60 || hits.is_empty(),
         mode: AnswerMode::Extractive,
         follow_up_suggestions: follow_up_suggestions(question, &analysis),
         latency_ms: started.elapsed().as_millis(),
@@ -1532,4 +1601,83 @@ mod tests {
         let analysis = analyze_question("What is Soroban?");
         assert!((0.0..=1.0).contains(&estimate_confidence(&[], &analysis)));
     }
+    #[test]
+    fn test_slugify_anchor() {
+        assert_eq!(slugify_anchor("# Deploy Policy"), "#deploy-policy");
+        assert_eq!(slugify_anchor("### Advanced Settings (v2)"), "#advanced-settings-v2");
+        assert_eq!(slugify_anchor("CLI JSON Stability"), "#cli-json-stability");
+        assert_eq!(slugify_anchor(""), "");
+    }
+
+    #[test]
+    fn test_extract_file_path() {
+        assert_eq!(
+            extract_file_path("docs/DEPLOY_POLICY.md"),
+            Some("docs/DEPLOY_POLICY.md".to_string())
+        );
+        assert_eq!(
+            extract_file_path("src/utils/ai_doc_qa.rs"),
+            Some("src/utils/ai_doc_qa.rs".to_string())
+        );
+        assert_eq!(extract_file_path("Stellar Documentation"), None);
+    }
+
+    #[test]
+    fn test_citations_from_hits_with_paths_and_anchors() {
+        let chunk = DocChunk {
+            id: "chk-1".to_string(),
+            source: "docs/DEPLOY_POLICY.md".to_string(),
+            kind: SourceKind::StarForge,
+            title: "## Deployment Checkpoints".to_string(),
+            url: Some("https://nanle-code.github.io/StarForge/docs/DEPLOYMENT_CHECKPOINTS.html".to_string()),
+            content: "Checkpoints allow resuming interrupted deployments safely.".to_string(),
+            language: QaLanguage::English,
+            chunk_index: 0,
+        };
+        let hit = SearchHit {
+            chunk,
+            score: 7.5,
+        };
+
+        let citations = citations_from_hits(&[hit]);
+        assert_eq!(citations.len(), 1);
+        let c = &citations[0];
+        assert_eq!(c.source, "docs/DEPLOY_POLICY.md");
+        assert_eq!(c.file_path, Some("docs/DEPLOY_POLICY.md".to_string()));
+        assert_eq!(c.section_anchor, Some("#deployment-checkpoints".to_string()));
+        assert!(c.confidence_score > 0.5);
+    }
+
+    #[test]
+    fn test_low_confidence_flag_on_empty_and_sparse_hits() {
+        let started = std::time::Instant::now();
+        let answer = extractive_answer("Unknown exotic topic?", &[], QaLanguage::English, started);
+        assert!(answer.is_low_confidence);
+        assert_eq!(answer.confidence, 0.0);
+        assert!(answer.citations.is_empty());
+        assert!(answer.answer.contains("No relevant documentation was found"));
+    }
+
+    #[test]
+    fn test_citation_json_serialization_and_deserialization() {
+        let citation = Citation {
+            source: "docs/CONFIG.md".to_string(),
+            title: "Configuration".to_string(),
+            url: None,
+            kind: SourceKind::StarForge,
+            snippet: "Config overlays merge in deterministic order.".to_string(),
+            file_path: Some("docs/CONFIG.md".to_string()),
+            section_anchor: Some("#configuration".to_string()),
+            confidence_score: 0.85,
+        };
+
+        let json_str = serde_json::to_string(&citation).unwrap();
+        assert!(json_str.contains("file_path"));
+        assert!(json_str.contains("section_anchor"));
+        assert!(json_str.contains("confidence_score"));
+
+        let deserialized: Citation = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(citation, deserialized);
+    }
 }
+
