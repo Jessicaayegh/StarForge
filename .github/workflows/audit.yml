@@ -7,11 +7,23 @@ on:
     branches: [master]
   schedule:
     - cron: '0 0 * * 0' # Weekly on Sundays
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-audit-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
   audit:
     name: Cargo Audit
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write   # audit-check reports results as a check run
+      issues: write   # on schedule, audit-check opens issues for new advisories
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v1.4.1
@@ -20,3 +32,23 @@ jobs:
           # Keep in sync with the documented, justified exceptions in audit.toml —
           # this action does not read that file itself, only this input.
           ignore: RUSTSEC-2026-0098,RUSTSEC-2026-0099,RUSTSEC-2026-0104,RUSTSEC-2025-0119,RUSTSEC-2024-0388,RUSTSEC-2024-0436,RUSTSEC-2025-0134,RUSTSEC-2026-0258,RUSTSEC-2026-0009
+
+  dependency-review:
+    name: Dependency Review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    # ADVISORY ONLY: cargo-deny (ci.yml) and cargo-audit (above) are the
+    # blocking supply-chain gates, and they carry the curated, justified ignore
+    # list in deny.toml/audit.toml. Dependency Review uses GitHub's advisory
+    # database, has no knowledge of those exceptions, and errors outright when
+    # the repository's dependency graph is disabled, so it must not block merges.
+    continue-on-error: true
+    permissions:
+      contents: read
+      pull-requests: write  # post the summary comment
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: on-failure

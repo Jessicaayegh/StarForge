@@ -8,11 +8,14 @@ import hashlib
 import shutil
 from pathlib import Path
 
+# Must match the `archive_name`/`archive_ext` matrix in .github/workflows/release.yml.
+# The `darwin` spelling is what install.sh (`uname -s` lowercased) and the
+# Homebrew formula updater download, so it is the canonical name for macOS.
 EXPECTED_ARCHIVES = {
     "starforge-linux-x86_64.tar.gz",
     "starforge-linux-aarch64.tar.gz",
-    "starforge-darwin-aarch64.tar.gz",
     "starforge-darwin-x86_64.tar.gz",
+    "starforge-darwin-aarch64.tar.gz",
     "starforge-windows-x86_64.zip",
     "starforge-amd64.deb",
     "starforge-x86_64.rpm",

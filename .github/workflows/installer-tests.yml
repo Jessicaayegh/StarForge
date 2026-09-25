@@ -13,6 +13,9 @@ on:
       - ".github/workflows/installer-tests.yml"
   workflow_call:
 
+permissions:
+  contents: read
+
 jobs:
   installer-linux:
     name: Installer Tests (Linux)

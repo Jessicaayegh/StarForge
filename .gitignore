@@ -194,3 +194,6 @@ test_snapshots/
 
 # proptest shrink artifacts (regenerated on demand; not source)
 *.proptest-regressions
+
+# Python bytecode (release/notes script tests)
+__pycache__/
