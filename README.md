@@ -12,9 +12,9 @@ templates, encrypted wallets and deployment safety checks for Stellar.**
 
 ## Overview
 
-**starforge** is a free, open-source command-line toolkit for developers building on the Stellar network. It brings together the most common Stellar and Soroban developer workflows â€” wallet management, project scaffolding, and contract deployment â€” into a single fast, ergonomic CLI.
+StarForge is an open-source command-line toolkit for building Soroban smart contracts on the Stellar network. It consolidates common developer workflows — wallet management, project scaffolding, and contract deployment — into a single fast, ergonomic Rust CLI.
 
-Think of it as the "Hardhat or Foundry" experience for the Stellar ecosystem, built in Rust for speed and reliability.
+It provides a Hardhat/Foundry-like experience for the Stellar ecosystem while prioritizing reproducibility and security.
 
 This project is actively maintained and participates in the [Stellar Wave Program](https://www.drips.network/wave/stellar) on Drips â€” a monthly open-source contribution sprint where contributors earn rewards for merged pull requests.
 
@@ -26,11 +26,12 @@ security gaps as issues tagged `security` and include the affected boundary.
 
 ## Features
 
-### ?? Wallet Management
-Create and manage Stellar ed25519 keypairs locally. Generate cryptographically secure keys using proper Stellar strkey encoding (G... for public, S... for secret). Optionally encrypt keys at rest with AES-256-GCM. Fund testnet accounts via Friendbot, list all saved wallets, inspect live on-chain balances, and securely store keys in `~/.starforge/config.toml`.
+### Wallet Management
+Create and manage Stellar ed25519 keypairs locally. Generate cryptographically secure keys using proper Stellar strkey encoding (G... for public, S... for secret). Optionally encrypt keys at rest with AES-256-GCM. Fund testnet accounts via Friendbot, list saved wallets, inspect on-chain balances, and securely store keys in `~/.starforge/config.toml`.
 
-### ? Project Scaffolding
-Scaffold new Soroban smart contract projects from battle-tested templates with one command. Choose from: `hello-world`, `token`, `nft`, and `voting`. Use interactive mode (`--interactive`) to customize contract options like author, license, storage type, and test inclusion. Also scaffolds full Stellar dApp frontends (Vite + React).
+
+### Project Scaffolding
+Scaffold new Soroban smart contract projects from battle-tested templates with one command. Choose from: `hello-world`, `token`, `nft`, and `voting`. Use interactive mode (`--interactive`) to customize contract options like author, license, storage type, and test inclusion. Also scaffolds optional dApp frontends (Vite + React).
 
 **NEW: Template Marketplace** - Discover and use community-contributed templates:
 ```bash
