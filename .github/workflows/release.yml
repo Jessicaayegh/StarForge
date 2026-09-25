@@ -289,9 +289,48 @@ jobs:
             dist/starforge-amd64.deb
             dist/starforge-x86_64.rpm
 
+  sbom:
+    name: Generate Software Bill of Materials (SBOM)
+    needs: secure-defaults
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run SBOM unit tests
+        run: python -m unittest tests/sbom_test.py
+
+      - name: Generate CycloneDX and SPDX SBOMs
+        run: |
+          mkdir -p dist
+          python scripts/generate_sbom.py \
+            --lock-file Cargo.lock \
+            --version "${{ github.ref_name }}" \
+            --out-dir dist \
+            --format both
+
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: starforge-sbom
+          path: |
+            dist/starforge-sbom.cdx.json
+            dist/starforge-sbom.spdx.json
+
+      - name: Attest SBOM provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/starforge-sbom.cdx.json
+            dist/starforge-sbom.spdx.json
+
   release:
     name: Publish GitHub Release
-    needs: [build, packaging]
+    needs: [build, packaging, sbom]
     runs-on: ubuntu-latest
     permissions:
       contents: write      # create the release and upload assets
@@ -302,6 +341,9 @@ jobs:
 
       - name: Test release artifact validation
         run: python -m unittest tests/release_artifacts_test.py
+
+      - name: Test SBOM generator
+        run: python -m unittest tests/sbom_test.py
 
       - name: Test release notes generator
         run: python -m unittest tests/release_notes_test.py
