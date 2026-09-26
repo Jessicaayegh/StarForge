@@ -234,6 +234,19 @@ Coverage analysis tracks Soroban contract functions, line spans, branch paths, u
 
 ---
 
+## `sep10`
+
+SEP-10 web authentication. Reads an anchor's `stellar.toml`, runs the
+challenge/response handshake with a saved wallet, and prints the JWT the anchor
+issues. See [SEP10_AUTH.md](SEP10_AUTH.md) for the full walkthrough, the validation
+rules, and the JSON output.
+
+| Subcommand | Purpose |
+|------------|---------|
+| `sep10 auth --domain <DOMAIN> --wallet <NAME>` | Authenticate and print the JWT (`--network`, `--toml-url`, `--json`, `--verbose`, `--output`) |
+
+---
+
 ## `template`
 
 | Subcommand | Purpose |

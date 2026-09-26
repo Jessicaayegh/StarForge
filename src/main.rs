@@ -154,9 +154,12 @@ enum Commands {
 
     Tx(commands::tx::TxArgs), // fetch transaction for the account
 
-    /// SEP-10 web authentication (anchor auth testing)
+    /// SEP-10 web authentication for Stellar anchors
+    ///
+    /// Runs the SEP-10 challenge/response handshake with a local wallet and
+    /// prints the JWT the anchor issues. See `docs/SEP10_AUTH.md`.
     #[command(subcommand)]
-    Sep10(commands::sep10::Sep10Commands),
+    Sep10(commands::sep::Sep10Args),
 
     /// View or switch the active network (testnet/mainnet)
     #[command(subcommand)]
@@ -620,7 +623,7 @@ async fn run() {
         Commands::Config(cmd) => commands::config::handle(cmd).await,
         Commands::Telemetry(cmd) => commands::telemetry::handle(cmd).await,
         Commands::Tx(args) => commands::tx::handle(args).await,
-        Commands::Sep10(cmd) => commands::sep10::handle(cmd).await,
+        Commands::Sep10(args) => commands::sep::handle(args).await,
         Commands::Network(cmd) => commands::network::handle(cmd).await,
         Commands::Node(cmd) => commands::node::handle(cmd).await,
         Commands::Completions(shell) => commands::completions::handle(shell).await,
