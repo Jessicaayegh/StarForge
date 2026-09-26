@@ -57,16 +57,16 @@ pub struct DeployArgs {
     #[arg(long, default_value = "false")]
     pub dry_run: bool,
     /// Sign deployment with a hardware wallet (Ledger/Trezor)
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, hide = true)]
     pub hardware: Option<HardwareWalletKind>,
     /// HD derivation path for hardware wallet signing
-    #[arg(long, default_value = crate::utils::hardware_wallet::STELLAR_HD_PATH)]
+    #[arg(long, default_value = crate::utils::hardware_wallet::STELLAR_HD_PATH, hide = true)]
     pub hd_path: String,
     /// Disable automatic rollback after a failed executed deploy
-    #[arg(long, default_value = "false")]
+    #[arg(long, default_value = "false", hide = true)]
     pub no_auto_rollback: bool,
     /// Run AI-driven compliance checks before deployment (regulatory, security, best practices)
-    #[arg(long, default_value = "false")]
+    #[arg(long, default_value = "false", hide = true)]
     pub compliance: bool,
     /// Emit a machine-readable JSON object instead of the human-readable deployment report
     #[arg(long)]

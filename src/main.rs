@@ -58,8 +58,12 @@ struct Cli {
 
     /// Allow signing when the configured passphrase differs from the connected endpoint.
     /// This is unsafe and should only be used with a deliberately trusted endpoint.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide = true)]
     allow_network_passphrase_mismatch: bool,
+
+    /// Show all help flags, including advanced/power-user options that are hidden by default
+    #[arg(long, global = true)]
+    help_all: bool,
 }
 
 #[derive(Subcommand)]
@@ -425,6 +429,28 @@ fn main() {
 #[tokio::main]
 async fn run() {
     let cli = Cli::parse();
+    
+    // Handle --help-all: show information about progressive disclosure
+    if cli.help_all {
+        eprintln!("StarForge Progressive Disclosure");
+        eprintln!("===============================");
+        eprintln!("");
+        eprintln!("StarForge uses progressive disclosure to reduce help noise by hiding");
+        eprintln!("advanced/power-user flags by default. These flags are typically used");
+        eprintln!("by experienced users or for specialized workflows.");
+        eprintln!("");
+        eprintln!("To see all flags including hidden ones, you can:");
+        eprintln!("  1. Use --help-all to see this message");
+        eprintln!("  2. Set STARFORGE_SHOW_ALL_HELP=1 environment variable");
+        eprintln!("");
+        eprintln!("Common hidden flags include:");
+        eprintln!("  --allow-network-passphrase-mismatch : Allow signing with mismatched passphrase (unsafe)");
+        eprintln!("  --hardware <ledger|trezor>           : Use hardware wallet for signing");
+        eprintln!("  --compliance                        : Run AI-driven compliance checks");
+        eprintln!("");
+        std::process::exit(0);
+    }
+    
     OUTPUT_MODE_INIT.call_once(|| {});
     utils::output::set_json_mode(cli.json);
     utils::output::set_plain_mode(cli.plain);

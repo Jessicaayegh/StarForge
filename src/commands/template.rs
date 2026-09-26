@@ -100,6 +100,12 @@ pub enum TemplateCommands {
         /// Maximum StarForge CLI version supported (semver, e.g. "1.99.99")
         #[arg(long)]
         cli_version_max: Option<String>,
+        /// Minimum Soroban SDK version required (semver, e.g. "22.0.0")
+        #[arg(long)]
+        soroban_sdk_min: Option<String>,
+        /// Maximum Soroban SDK version supported (semver, e.g. "23.0.0")
+        #[arg(long)]
+        soroban_sdk_max: Option<String>,
         /// SPDX license identifier (e.g. "MIT", "Apache-2.0")
         #[arg(long)]
         license: Option<String>,
@@ -229,6 +235,8 @@ pub async fn handle(cmd: TemplateCommands) -> Result<()> {
                 version,
                 cli_version_min,
                 cli_version_max,
+                None,
+                None,
             )
             .await
         }
@@ -241,6 +249,8 @@ pub async fn handle(cmd: TemplateCommands) -> Result<()> {
             version,
             cli_version_min,
             cli_version_max,
+            soroban_sdk_min,
+            soroban_sdk_max,
             license,
             repository,
             homepage,
@@ -255,6 +265,8 @@ pub async fn handle(cmd: TemplateCommands) -> Result<()> {
                 version,
                 cli_version_min,
                 cli_version_max,
+                soroban_sdk_min,
+                soroban_sdk_max,
                 license,
                 repository,
                 homepage,
@@ -380,6 +392,8 @@ async fn import(
         None,
         None,
         None,
+        None,
+        None,
     )
     .await?;
     p::header("Template Import");
@@ -400,6 +414,8 @@ async fn publish(
     version: String,
     cli_version_min: Option<String>,
     cli_version_max: Option<String>,
+    soroban_sdk_min: Option<String>,
+    soroban_sdk_max: Option<String>,
     license: Option<String>,
     repository: Option<String>,
     homepage: Option<String>,
@@ -440,6 +456,8 @@ async fn publish(
         version,
         cli_version_min,
         cli_version_max,
+        soroban_sdk_min,
+        soroban_sdk_max,
         license,
         repository,
         homepage,

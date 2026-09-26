@@ -178,6 +178,14 @@ pub struct TemplateEntry {
     /// `None` means no upper bound.
     #[serde(default)]
     pub cli_version_max: Option<String>,
+    /// Minimum Soroban SDK version required by this template (semver, e.g. "22.0.0").
+    /// `None` means no minimum — the template is compatible with all SDK versions.
+    #[serde(default)]
+    pub soroban_sdk_min: Option<String>,
+    /// Maximum Soroban SDK version supported by this template (semver, e.g. "23.0.0").
+    /// `None` means no upper bound.
+    #[serde(default)]
+    pub soroban_sdk_max: Option<String>,
     /// Whether the template ships user-facing documentation (e.g. a README).
     #[serde(default)]
     pub documented: bool,
@@ -250,6 +258,12 @@ pub enum CompatibilityStatus {
     },
     /// Template metadata contains a malformed version string.
     MalformedMetadata { reason: String },
+    /// Template requires a specific Soroban SDK version
+    SorobanSdkIncompatible {
+        sdk_min: Option<String>,
+        sdk_max: Option<String>,
+        found_version: String,
+    },
 }
 
 /// Parse a semver string `"major.minor.patch"` into `(major, minor, patch)`.
@@ -320,11 +334,87 @@ pub fn check_version_range(
 /// `cli_version_max` are both `None`) are always considered compatible, ensuring
 /// full backward compatibility with pre-versioning templates.
 pub fn check_template_compatibility(entry: &TemplateEntry) -> CompatibilityStatus {
-    check_version_range(
+    // First check CLI version compatibility
+    let cli_status = check_version_range(
         CLI_VERSION,
         entry.cli_version_min.as_deref(),
         entry.cli_version_max.as_deref(),
-    )
+    );
+    
+    if !matches!(cli_status, CompatibilityStatus::Compatible) {
+        return cli_status;
+    }
+    
+    // Then check Soroban SDK version compatibility if constraints are present
+    if entry.soroban_sdk_min.is_some() || entry.soroban_sdk_max.is_some() {
+        let detected_sdk = detect_soroban_sdk_version(entry);
+        if let Some(sdk_version) = detected_sdk {
+            let sdk_status = check_version_range(
+                &sdk_version,
+                entry.soroban_sdk_min.as_deref(),
+                entry.soroban_sdk_max.as_deref(),
+            );
+            
+            if !matches!(sdk_status, CompatibilityStatus::Compatible) {
+                return CompatibilityStatus::SorobanSdkIncompatible {
+                    sdk_min: entry.soroban_sdk_min.clone(),
+                    sdk_max: entry.soroban_sdk_max.clone(),
+                    found_version: sdk_version,
+                };
+            }
+        }
+    }
+    
+    CompatibilityStatus::Compatible
+}
+
+/// Detect the Soroban SDK version from a template's Cargo.toml.
+/// Returns None if the version cannot be determined.
+fn detect_soroban_sdk_version(entry: &TemplateEntry) -> Option<String> {
+    // Try to read Cargo.toml from the template path if available
+    if let Some(ref path) = entry.path {
+        let cargo_toml_path = std::path::PathBuf::from(path).join("Cargo.toml");
+        if cargo_toml_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&cargo_toml_path) {
+                return extract_soroban_sdk_version_from_cargo_toml(&content);
+            }
+        }
+    }
+    
+    // For remote templates, we can't detect the version without downloading
+    // Return None to skip SDK compatibility checks
+    None
+}
+
+/// Extract Soroban SDK version from Cargo.toml content.
+fn extract_soroban_sdk_version_from_cargo_toml(content: &str) -> Option<String> {
+    // Look for soroban-sdk dependency
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with("soroban-sdk") || line.contains("soroban-sdk") {
+            // Try to extract version from patterns like:
+            // soroban-sdk = "22.0.0"
+            // soroban-sdk = { version = "22.0.0", features = [...] }
+            if let Some(start) = line.find('"') {
+                if let Some(end) = line.rfind('"') {
+                    let version_str = &line[start + 1..end];
+                    // Extract just the version number (handle potential operators like >=, ^)
+                    let version = version_str
+                        .trim_start_matches('^')
+                        .trim_start_matches(">=")
+                        .trim_start_matches('>')
+                        .trim_start_matches('<')
+                        .trim_start_matches('=')
+                        .trim();
+                    
+                    if !version.is_empty() {
+                        return Some(version.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Validate that `entry` is compatible with the running CLI and return an
@@ -1894,6 +1984,8 @@ pub async fn publish_template_versioned(
     version: String,
     cli_version_min: Option<String>,
     cli_version_max: Option<String>,
+    soroban_sdk_min: Option<String>,
+    soroban_sdk_max: Option<String>,
     license: Option<String>,
     repository: Option<String>,
     homepage: Option<String>,
@@ -1905,7 +1997,17 @@ pub async fn publish_template_versioned(
 
     let (source_root, _temp_guard) = resolve_template_source(template_path)?;
 
-    validate_template_structure(&source_root, &name, &description, &author, &version)?;
+    validate_template_structure_with_constraints(
+        &source_root, 
+        &name, 
+        &description, 
+        &author, 
+        &version,
+        cli_version_min.as_deref(),
+        cli_version_max.as_deref(),
+        soroban_sdk_min.as_deref(),
+        soroban_sdk_max.as_deref(),
+    )?;
 
     let storage_root = template_storage_dir()?.join(&name);
     let dest = storage_root.join(&version);
@@ -1961,6 +2063,8 @@ pub async fn publish_template_versioned(
         updated_at: created_at,
         cli_version_min,
         cli_version_max,
+        soroban_sdk_min,
+        soroban_sdk_max,
         documented: source_root.join("README.md").exists(),
         maintenance: MaintenanceStatus::Active,
         license,
@@ -1992,6 +2096,8 @@ pub fn validate_template_structure(
         version,
         None,
         None,
+        None,
+        None,
     )
 }
 
@@ -2009,6 +2115,8 @@ pub fn validate_template_structure_with_constraints(
     version: &str,
     cli_version_min: Option<&str>,
     cli_version_max: Option<&str>,
+    soroban_sdk_min: Option<&str>,
+    soroban_sdk_max: Option<&str>,
 ) -> Result<()> {
     // --- 1. Metadata completeness ---
     let mut missing: Vec<&str> = Vec::new();
@@ -2062,6 +2170,36 @@ pub fn validate_template_structure_with_constraints(
             if min_v > max_v {
                 anyhow::bail!(
                     "cli_version_min '{}' is greater than cli_version_max '{}'. \
+                     Fix the version bounds so that min <= max.",
+                    min,
+                    max
+                );
+            }
+        }
+    }
+
+    // --- 3.5. Soroban SDK version constraints format (if provided) ---
+    if let Some(min) = soroban_sdk_min {
+        if parse_semver(min).is_err() {
+            anyhow::bail!(
+                "soroban_sdk_min '{}' is not valid semver (expected major.minor.patch, e.g. \"22.0.0\").",
+                min
+            );
+        }
+    }
+    if let Some(max) = soroban_sdk_max {
+        if parse_semver(max).is_err() {
+            anyhow::bail!(
+                "soroban_sdk_max '{}' is not valid semver (expected major.minor.patch, e.g. \"23.0.0\").",
+                max
+            );
+        }
+    }
+    if let (Some(min), Some(max)) = (soroban_sdk_min, soroban_sdk_max) {
+        if let (Ok(min_v), Ok(max_v)) = (parse_semver(min), parse_semver(max)) {
+            if min_v > max_v {
+                anyhow::bail!(
+                    "soroban_sdk_min '{}' is greater than soroban_sdk_max '{}'. \
                      Fix the version bounds so that min <= max.",
                     min,
                     max
@@ -2887,6 +3025,8 @@ mod tests {
             "1.0.0",
             Some("bad"),
             None,
+            None,
+            None,
         )
         .unwrap_err();
         assert!(
@@ -2907,6 +3047,8 @@ mod tests {
             "1.0.0",
             Some("2.0.0"),
             Some("1.0.0"),
+            None,
+            None,
         )
         .unwrap_err();
         assert!(
@@ -2943,6 +3085,8 @@ mod tests {
             "1.0.0".to_string(),
             Some("0.1.0".to_string()),
             Some("1.0.0".to_string()),
+            None,
+            None,
             Some("MIT".to_string()),
             Some("https://example.com".to_string()),
             Some("https://docs.example.com".to_string()),
@@ -2963,6 +3107,8 @@ mod tests {
             "1.1.0".to_string(),
             Some("0.1.0".to_string()),
             Some("1.0.0".to_string()),
+            None,
+            None,
             Some("MIT".to_string()),
             Some("https://example.com".to_string()),
             Some("https://docs.example.com".to_string()),
