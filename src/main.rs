@@ -58,8 +58,12 @@ struct Cli {
 
     /// Allow signing when the configured passphrase differs from the connected endpoint.
     /// This is unsafe and should only be used with a deliberately trusted endpoint.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide = true)]
     allow_network_passphrase_mismatch: bool,
+
+    /// Show all help flags, including advanced/power-user options that are hidden by default
+    #[arg(long, global = true)]
+    help_all: bool,
 }
 
 #[derive(Subcommand)]
@@ -134,8 +138,6 @@ enum Commands {
     Environment(commands::environment::EnvironmentCommands),
     /// Show starforge config and environment info
     Info,
-    /// Collect environment diagnostics for a bug report
-    BugReport(commands::bug_report::BugReportArgs),
     /// Manage AI prompt templates and versioning
     #[command(subcommand)]
     Prompts(commands::prompts::PromptsCommands),
@@ -390,9 +392,12 @@ enum Commands {
     #[command(subcommand)]
     AiSecurityTraining(commands::ai_security_training::AiSecurityTrainingCommands),
 
-    /// Contract health monitoring, performance tracking, security events, alerting, and dashboard
     #[command(subcommand)]
     ContractMonitor(commands::contract_monitor::ContractMonitorCommands),
+
+    /// Terminal User Interface for wallets, contracts, and transactions
+    #[cfg(feature = "ui")]
+    Ui(commands::ui::UiArgs),
 }
 
 static OUTPUT_MODE_INIT: Once = Once::new();
@@ -430,6 +435,28 @@ fn main() {
 #[tokio::main]
 async fn run() {
     let cli = Cli::parse();
+    
+    // Handle --help-all: show information about progressive disclosure
+    if cli.help_all {
+        eprintln!("StarForge Progressive Disclosure");
+        eprintln!("===============================");
+        eprintln!("");
+        eprintln!("StarForge uses progressive disclosure to reduce help noise by hiding");
+        eprintln!("advanced/power-user flags by default. These flags are typically used");
+        eprintln!("by experienced users or for specialized workflows.");
+        eprintln!("");
+        eprintln!("To see all flags including hidden ones, you can:");
+        eprintln!("  1. Use --help-all to see this message");
+        eprintln!("  2. Set STARFORGE_SHOW_ALL_HELP=1 environment variable");
+        eprintln!("");
+        eprintln!("Common hidden flags include:");
+        eprintln!("  --allow-network-passphrase-mismatch : Allow signing with mismatched passphrase (unsafe)");
+        eprintln!("  --hardware <ledger|trezor>           : Use hardware wallet for signing");
+        eprintln!("  --compliance                        : Run AI-driven compliance checks");
+        eprintln!("");
+        std::process::exit(0);
+    }
+    
     OUTPUT_MODE_INIT.call_once(|| {});
     utils::output::set_json_mode(cli.json);
     utils::output::set_plain_mode(cli.plain);
@@ -539,7 +566,6 @@ async fn run() {
         Commands::Lint(_) => "lint",
         Commands::Man(_) => "man",
         Commands::Diagnostics(_) => "diagnostics",
-        Commands::BugReport(_) => "bug-report",
         Commands::TemplateVcs(_) => "template-vcs",
         Commands::Perf(_) => "perf",
         Commands::AdvancedPerf(_) => "advanced-perf",
@@ -555,6 +581,8 @@ async fn run() {
         Commands::Optimize(_) => "optimize",
         Commands::AiSecurityTraining(_) => "ai-security-training",
         Commands::ContractMonitor(_) => "contract-monitor",
+        #[cfg(feature = "ui")]
+        Commands::Ui(_) => "ui",
     }
     .to_string();
 
@@ -651,7 +679,6 @@ async fn run() {
         Commands::Lint(args) => commands::lint::handle(args).await,
         Commands::Man(cmd) => commands::man::handle(cmd).await,
         Commands::Diagnostics(args) => commands::diagnostics::handle(args),
-        Commands::BugReport(args) => commands::bug_report::handle(args),
         Commands::TemplateVcs(cmd) => commands::template_vcs::handle(cmd).await,
         Commands::Perf(cmd) => commands::perf::handle(cmd).await,
         Commands::AdvancedPerf(cmd) => commands::perf::handle_advanced(cmd).await,
@@ -671,6 +698,8 @@ async fn run() {
         Commands::Optimize(cmd) => commands::optimize::handle(cmd).await,
         Commands::AiSecurityTraining(cmd) => commands::ai_security_training::handle(cmd).await,
         Commands::ContractMonitor(cmd) => commands::contract_monitor::handle(cmd).await,
+        #[cfg(feature = "ui")]
+        Commands::Ui(args) => commands::ui::handle(args).await,
     };
     let duration = start.elapsed();
 

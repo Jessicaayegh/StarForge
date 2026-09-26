@@ -4,12 +4,23 @@ on:
   push:
     tags:
       - "v*"
+  # Dry run: builds, smoke-tests and packages every platform archive plus
+  # SHA256SUMS.txt as workflow artifacts, without publishing a release,
+  # attesting provenance, or touching the Homebrew formula. Use it to check
+  # the release matrix before pushing a tag.
+  workflow_dispatch:
 
+# Least privilege by default; jobs that publish or attest opt in below.
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
-  packages: write
+  contents: read
+
+# Never cancel a release that is already in flight.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
   secure-defaults:
@@ -27,6 +38,10 @@ jobs:
     name: Build (${{ matrix.archive_name }}.${{ matrix.archive_ext }})
     needs: secure-defaults
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write      # build provenance attestation (OIDC)
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -45,8 +60,9 @@ jobs:
             archive_ext: tar.gz
             binary_name: starforge
 
-          # macOS x86_64 — native on macos-13 (Intel runner)
-          - os: macos-13
+          # macOS x86_64 — native on macos-15-intel (macos-13 was retired
+          # by GitHub, so jobs targeting it would never be scheduled)
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             archive_name: starforge-darwin-x86_64
             archive_ext: tar.gz
@@ -59,7 +75,7 @@ jobs:
             archive_ext: zip
             binary_name: starforge.exe
 
-          # Linux ARM64 — cross-compiled using `cross`
+          # Linux ARM64 — cross-compiled with gcc-aarch64-linux-gnu
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             archive_name: starforge-linux-aarch64
@@ -74,10 +90,11 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # Cross-compiled natively with a gcc cross-linker (not `cross`).
       # Only runs for the aarch64-unknown-linux-gnu matrix entry
       - name: Install aarch64 Linux cross-linker
         if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: sudo apt-get install -y gcc-aarch64-linux-gnu
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
 
       # Tells cargo which linker to use when targeting aarch64 Linux
       - name: Configure cargo linker for aarch64 Linux
@@ -91,6 +108,16 @@ jobs:
 
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # Every natively built Unix binary must at least start. The aarch64 Linux
+      # binary is cross-compiled and cannot execute on the x86_64 runner.
+      - name: Smoke test binary (Linux / macOS)
+        if: runner.os != 'Windows' && matrix.target != 'aarch64-unknown-linux-gnu'
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release/${{ matrix.binary_name }}"
+          "$BIN" --version
+          "$BIN" --help > /dev/null
 
       # RELEASE-BLOCKING for Windows: the publish job depends on this build
       # job, so a Windows binary that cannot start or whose --help/doctor
@@ -114,11 +141,7 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           mkdir -p dist
-          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
-            cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} dist/starforge
-          else
-            cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} dist/starforge
-          fi
+          cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} dist/starforge
           # Include man pages if present
           if [ -d man ] && ls man/*.1 >/dev/null 2>&1; then
             tar -czf "dist/${{ matrix.archive_name }}.tar.gz" -C dist starforge -C "$GITHUB_WORKSPACE" man
@@ -145,6 +168,7 @@ jobs:
           path: dist/${{ matrix.archive_name }}.*
 
       - name: Attest release archive provenance
+        if: startsWith(github.ref, 'refs/tags/')
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: dist/${{ matrix.archive_name }}.*
@@ -265,10 +289,51 @@ jobs:
             dist/starforge-amd64.deb
             dist/starforge-x86_64.rpm
 
+  sbom:
+    name: Generate Software Bill of Materials (SBOM)
+    needs: secure-defaults
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run SBOM unit tests
+        run: python -m unittest tests/sbom_test.py
+
+      - name: Generate CycloneDX and SPDX SBOMs
+        run: |
+          mkdir -p dist
+          python scripts/generate_sbom.py \
+            --lock-file Cargo.lock \
+            --version "${{ github.ref_name }}" \
+            --out-dir dist \
+            --format both
+
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: starforge-sbom
+          path: |
+            dist/starforge-sbom.cdx.json
+            dist/starforge-sbom.spdx.json
+
+      - name: Attest SBOM provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/starforge-sbom.cdx.json
+            dist/starforge-sbom.spdx.json
+
   release:
     name: Publish GitHub Release
-    needs: [build, packaging]
+    needs: [build, packaging, sbom]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write      # create the release and upload assets
     steps:
       - uses: actions/checkout@v4
         with:
@@ -277,26 +342,47 @@ jobs:
       - name: Test release artifact validation
         run: python -m unittest tests/release_artifacts_test.py
 
+      - name: Test SBOM generator
+        run: python -m unittest tests/sbom_test.py
+
       - name: Test release notes generator
         run: python -m unittest tests/release_notes_test.py
 
       - name: Generate release notes
         run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION="0.0.0-dry-run+${GITHUB_SHA::7}"
+          fi
           python scripts/release_notes.py \
             --repo "$GITHUB_WORKSPACE" \
-            --version "${GITHUB_REF#refs/tags/v}" \
+            --version "$VERSION" \
             --out BODY.md
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-artifacts
+          # Only the platform archives; ignore any diagnostic log artifacts.
+          pattern: starforge-*
 
       - name: Prepare release files
         run: |
           python scripts/release_artifacts.py release-artifacts release-files
 
+      - name: Upload release files (dry run)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-files-dry-run
+          path: |
+            release-files/
+            BODY.md
+          retention-days: 7
+
       - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           body_path: BODY.md
@@ -321,7 +407,7 @@ jobs:
         id: version
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Verify release artifacts exist
         env:
@@ -383,10 +469,10 @@ jobs:
         id: changes
         run: |
           if git diff --quiet packaging/homebrew/starforge.rb; then
-            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "No changes to formula"
           else
-            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "changed=true" >> "$GITHUB_OUTPUT"
             echo "Formula has changes:"
             git diff packaging/homebrew/starforge.rb
           fi

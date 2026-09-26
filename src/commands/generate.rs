@@ -20,6 +20,9 @@ pub enum GenerateCommands {
         #[arg(short, long, default_value = "contract.rs")]
         out: PathBuf,
     },
+    /// Generate typed client bindings from a contract WASM or spec
+    /// (same as `starforge contract generate-bindings`)
+    Bindings(crate::commands::contract::GenerateBindingsArgs),
 }
 
 #[derive(Serialize, Clone)]
@@ -155,6 +158,9 @@ pub async fn handle(cmd: &GenerateCommands) -> Result<()> {
                 }
             }
             Ok(())
+        }
+        GenerateCommands::Bindings(args) => {
+            crate::commands::contract::handle_generate_bindings(args)
         }
     }
 }

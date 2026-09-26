@@ -3,7 +3,14 @@ use std::io::Cursor;
 use std::path::Path;
 use stellar_xdr::curr::{
     Limited, Limits, ReadXdr, ScSpecEntry, ScSpecFunctionV0, ScSpecTypeDef, ScSpecUdtEnumV0,
-    ScSpecUdtStructV0,
+    ScSpecUdtErrorEnumV0, ScSpecUdtStructV0, ScSpecUdtUnionCaseV0, ScSpecUdtUnionV0, WriteXdr,
+};
+
+pub mod typescript;
+
+pub use typescript::{
+    generate_typescript_package, write_generated_files, GeneratedFile, TsModuleFormat,
+    TsPackageOptions, WriteReport,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +27,11 @@ pub struct ContractMetadata {
     pub structs: Vec<ContractStruct>,
     pub enums: Vec<ContractEnum>,
     pub events: Vec<ContractEvent>,
+    /// Tagged unions (`ScSpecUdtUnionV0`). Every variant is rendered as a
+    /// discriminated-union member, even when it carries no data.
+    pub unions: Vec<ContractEnum>,
+    /// Contract error enums (`ScSpecUdtErrorEnumV0`) with their numeric codes.
+    pub errors: Vec<ContractErrorEnum>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +39,8 @@ pub struct ContractFunction {
     pub name: String,
     pub inputs: Vec<ContractInput>,
     pub output: Option<String>,
+    /// Documentation comment from the contract spec (empty when absent).
+    pub doc: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +71,21 @@ pub struct ContractEnum {
 pub struct ContractVariant {
     pub name: String,
     pub type_name: Option<String>,
+    /// Integer discriminant for C-like enums (`None` for union cases).
+    pub value: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContractErrorEnum {
+    pub name: String,
+    pub cases: Vec<ContractErrorCase>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContractErrorCase {
+    pub name: String,
+    pub value: u32,
+    pub doc: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,26 +94,113 @@ pub struct ContractEvent {
     pub fields: Vec<ContractField>,
 }
 
-/// Reads a compiled contract WASM file and extracts its contract metadata
-/// (functions, structs, enums, events). Shared by [`generate_bindings`] and
-/// callers that need the parsed metadata directly, e.g. to generate an
-/// installable package rather than a single source string.
-pub fn load_contract_metadata(wasm_path: &Path) -> Result<ContractMetadata> {
-    let wasm = std::fs::read(wasm_path)
-        .with_context(|| format!("Failed to read WASM file {}", wasm_path.display()))?;
-    let entries = read_spec_entries(&wasm)?;
-    let metadata = parse_spec_entries(&entries);
+pub fn generate_bindings(wasm_path: &Path, language: BindingLanguage) -> Result<String> {
+    let metadata = load_metadata(wasm_path)?;
+    generate_from_metadata(&metadata, language)
+}
 
+/// Read a contract spec from `path` and parse it into [`ContractMetadata`].
+///
+/// The input may be a compiled WASM (the spec is read from its
+/// `contractspecv0` custom section), a raw XDR stream of `ScSpecEntry`
+/// values, or that XDR encoded as base64 (a single blob, or one entry per
+/// whitespace-separated chunk).
+pub fn load_metadata(path: &Path) -> Result<ContractMetadata> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("Failed to read contract input {}", path.display()))?;
+    let entries = read_spec_input(&bytes)?;
+    let metadata = parse_spec_entries(&entries);
     if metadata.functions.is_empty() {
         anyhow::bail!("No contract functions found in WASM metadata");
     }
-
     Ok(metadata)
 }
 
-pub fn generate_bindings(wasm_path: &Path, language: BindingLanguage) -> Result<String> {
-    let metadata = load_contract_metadata(wasm_path)?;
-    generate_from_metadata(&metadata, language)
+/// Decode spec entries from WASM, raw XDR, or base64 XDR bytes.
+pub fn read_spec_input(bytes: &[u8]) -> Result<Vec<ScSpecEntry>> {
+    if bytes.starts_with(b"\0asm") {
+        return read_spec_entries(bytes);
+    }
+    if bytes.is_empty() {
+        anyhow::bail!("Input is not a valid WASM binary or contract spec (file is empty)");
+    }
+    if let Ok(entries) = decode_spec_xdr(bytes) {
+        if !entries.is_empty() {
+            return Ok(entries);
+        }
+    }
+    if let Some(entries) = decode_spec_base64(bytes) {
+        return Ok(entries);
+    }
+    anyhow::bail!(
+        "Input is not a valid WASM binary or contract spec (expected WASM, raw XDR, or base64 XDR)"
+    )
+}
+
+fn decode_spec_base64(bytes: &[u8]) -> Option<Vec<ScSpecEntry>> {
+    use base64::Engine as _;
+    let text = std::str::from_utf8(bytes).ok()?;
+    let engine = base64::engine::general_purpose::STANDARD;
+    let mut entries = Vec::new();
+    for chunk in text.split_whitespace() {
+        let raw = engine.decode(chunk).ok()?;
+        entries.extend(decode_spec_xdr(&raw).ok()?);
+    }
+    if entries.is_empty() {
+        None
+    } else {
+        Some(entries)
+    }
+}
+
+fn decode_spec_xdr(bytes: &[u8]) -> Result<Vec<ScSpecEntry>> {
+    let cursor = Cursor::new(bytes);
+    ScSpecEntry::read_xdr_iter(&mut Limited::new(
+        cursor,
+        Limits {
+            depth: 500,
+            len: 0x1000000,
+        },
+    ))
+    .collect::<std::result::Result<Vec<_>, _>>()
+    .context("Failed to decode contract spec XDR")
+}
+
+/// Build a minimal WASM module whose `contractspecv0` custom section holds
+/// `entries`. Useful for fixtures and tests that need a "compiled" contract
+/// without a Soroban toolchain.
+pub fn wasm_with_spec(entries: &[ScSpecEntry]) -> Result<Vec<u8>> {
+    let mut payload = Vec::new();
+    for entry in entries {
+        payload.extend(
+            entry
+                .to_xdr(Limits::none())
+                .context("Failed to encode spec entry as XDR")?,
+        );
+    }
+    let name = b"contractspecv0";
+    let mut section = Vec::new();
+    write_var_u32(&mut section, name.len() as u32);
+    section.extend_from_slice(name);
+    section.extend(payload);
+
+    let mut wasm = b"\0asm\x01\x00\x00\x00".to_vec();
+    wasm.push(0);
+    write_var_u32(&mut wasm, section.len() as u32);
+    wasm.extend(section);
+    Ok(wasm)
+}
+
+fn write_var_u32(out: &mut Vec<u8>, mut value: u32) {
+    loop {
+        let byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value == 0 {
+            out.push(byte);
+            return;
+        }
+        out.push(byte | 0x80);
+    }
 }
 
 /// Generate a language binding from already-parsed contract metadata.
@@ -97,7 +213,7 @@ pub fn generate_from_metadata(
 ) -> Result<String> {
     match language {
         BindingLanguage::Rust => Ok(generate_rust(metadata)),
-        BindingLanguage::TypeScript => Ok(generate_typescript(metadata)),
+        BindingLanguage::TypeScript => typescript::generate_single_file(metadata),
         BindingLanguage::Python => Ok(generate_python(metadata)),
         BindingLanguage::Go => Ok(generate_go(metadata)),
     }
@@ -307,6 +423,8 @@ pub fn parse_spec_entries(entries: &[ScSpecEntry]) -> ContractMetadata {
     let mut structs = Vec::new();
     let mut enums = Vec::new();
     let mut events = Vec::new();
+    let mut unions = Vec::new();
+    let mut errors = Vec::new();
 
     for entry in entries {
         match entry {
@@ -320,7 +438,9 @@ pub fn parse_spec_entries(entries: &[ScSpecEntry]) -> ContractMetadata {
                 enums.push(contract_enum(udt));
             }
             ScSpecEntry::UdtErrorEnumV0(error_enum) => {
-                // Extract error enums as events
+                errors.push(contract_error_enum(error_enum));
+                // Also kept as event-like records for the Rust/Python/Go
+                // generators, which predate first-class error enums.
                 events.push(ContractEvent {
                     name: error_enum.name.to_string(),
                     fields: error_enum
@@ -333,7 +453,9 @@ pub fn parse_spec_entries(entries: &[ScSpecEntry]) -> ContractMetadata {
                         .collect(),
                 });
             }
-            ScSpecEntry::UdtUnionV0(_) => {}
+            ScSpecEntry::UdtUnionV0(udt) => {
+                unions.push(contract_union(udt));
+            }
             #[allow(unreachable_patterns)]
             _ => {}
         }
@@ -344,6 +466,53 @@ pub fn parse_spec_entries(entries: &[ScSpecEntry]) -> ContractMetadata {
         structs,
         enums,
         events,
+        unions,
+        errors,
+    }
+}
+
+fn contract_error_enum(udt: &ScSpecUdtErrorEnumV0) -> ContractErrorEnum {
+    ContractErrorEnum {
+        name: udt.name.to_string(),
+        cases: udt
+            .cases
+            .iter()
+            .map(|case| ContractErrorCase {
+                name: case.name.to_string(),
+                value: case.value,
+                doc: case.doc.to_string(),
+            })
+            .collect(),
+    }
+}
+
+fn contract_union(udt: &ScSpecUdtUnionV0) -> ContractEnum {
+    ContractEnum {
+        name: udt.name.to_string(),
+        variants: udt
+            .cases
+            .iter()
+            .map(|case| match case {
+                ScSpecUdtUnionCaseV0::VoidV0(void) => ContractVariant {
+                    name: void.name.to_string(),
+                    type_name: None,
+                    value: None,
+                },
+                ScSpecUdtUnionCaseV0::TupleV0(tuple) => {
+                    let types = tuple.type_.iter().map(spec_type_name).collect::<Vec<_>>();
+                    let type_name = if types.len() == 1 {
+                        types[0].clone()
+                    } else {
+                        format!("({})", types.join(", "))
+                    };
+                    ContractVariant {
+                        name: tuple.name.to_string(),
+                        type_name: Some(type_name),
+                        value: None,
+                    }
+                }
+            })
+            .collect(),
     }
 }
 
@@ -359,6 +528,7 @@ fn contract_function(function: &ScSpecFunctionV0) -> ContractFunction {
             })
             .collect(),
         output: function.outputs.first().map(spec_type_name),
+        doc: function.doc.to_string(),
     }
 }
 
@@ -385,6 +555,7 @@ fn contract_enum(udt: &ScSpecUdtEnumV0) -> ContractEnum {
             .map(|case| ContractVariant {
                 name: case.name.to_string(),
                 type_name: None,
+                value: Some(case.value),
             })
             .collect(),
     }
@@ -1051,109 +1222,6 @@ pub fn generate_rust(metadata: &ContractMetadata) -> String {
     out
 }
 
-fn generate_typescript(metadata: &ContractMetadata) -> String {
-    let mut out = String::from(
-        "export type ContractClientOptions = {\n\
-         \tcontractId: string;\n\
-         \tnetwork?: string;\n\
-         \twallet?: string;\n\
-         };\n\n\
-         export class ContractClient {\n\
-         \tconstructor(private readonly options: ContractClientOptions) {}\n\n\
-         \tprivate invokeArgs(functionName: string, args: Array<[unknown, string]>): string[] {\n\
-         \t\tconst cli = [\"contract\", \"invoke\", this.options.contractId, functionName, \"--network\", this.options.network ?? \"testnet\"];\n\
-         \t\tfor (const [value, typeName] of args) cli.push(\"--arg\", String(value), \"--type\", typeName);\n\
-         \t\tif (this.options.wallet) cli.push(\"--wallet\", this.options.wallet, \"--submit\");\n\
-         \t\treturn cli;\n\
-         \t}\n\n",
-    );
-
-    for function in &metadata.functions {
-        let ts_name = sanitize_ident(&function.name);
-        let params = function
-            .inputs
-            .iter()
-            .map(|input| {
-                format!(
-                    "{}: {}",
-                    sanitize_ident(&input.name),
-                    ts_type(&input.type_name)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let return_type = function
-            .output
-            .as_deref()
-            .map(ts_type)
-            .unwrap_or_else(|| "void".to_string());
-        out.push_str(&format!(
-            "\t{name}({params}): string[] /* returns CLI args; expected result: {return_type} */ {{\n\
-             \t\treturn this.invokeArgs(\"{source}\", [",
-            name = ts_name,
-            source = function.name
-        ));
-        out.push_str(
-            &function
-                .inputs
-                .iter()
-                .map(|input| format!("[{}, \"{}\"]", sanitize_ident(&input.name), input.type_name))
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
-        out.push_str("]);\n\t}\n\n");
-    }
-
-    out.push_str("}\n\n");
-
-    for struct_def in &metadata.structs {
-        let struct_name = pascal_case(&struct_def.name);
-        out.push_str(&format!("export interface {} {{\n", struct_name));
-        for field in &struct_def.fields {
-            let field_name = camel_case(&field.name);
-            let ts_ty = ts_type(&field.type_name);
-            out.push_str(&format!("\t{}: {};\n", field_name, ts_ty));
-        }
-        out.push_str("}\n\n");
-    }
-
-    for enum_def in &metadata.enums {
-        let enum_name = pascal_case(&enum_def.name);
-        out.push_str(&format!("export type {} = \n", enum_name));
-        for (i, variant) in enum_def.variants.iter().enumerate() {
-            let variant_name = camel_case(&variant.name);
-            let variant_type = if let Some(ty) = &variant.type_name {
-                format!("{{ type: \"{}\"; value: {} }}", variant_name, ts_type(ty))
-            } else {
-                format!("{{ type: \"{}\" }}", variant_name)
-            };
-            if i == enum_def.variants.len() - 1 {
-                out.push_str(&format!("\t{};\n", variant_type));
-            } else {
-                out.push_str(&format!("\t{} |\n", variant_type));
-            }
-        }
-        out.push('\n');
-    }
-
-    // Generate event type definitions
-    if !metadata.events.is_empty() {
-        out.push_str("// Event type definitions\n");
-        for event in &metadata.events {
-            let event_name = pascal_case(&event.name);
-            out.push_str(&format!("export interface {}Event {{\n", event_name));
-            for field in &event.fields {
-                let field_name = camel_case(&field.name);
-                let ts_ty = ts_type(&field.type_name);
-                out.push_str(&format!("\t{}: {};\n", field_name, ts_ty));
-            }
-            out.push_str("}\n\n");
-        }
-    }
-
-    out
-}
-
 fn generate_python(metadata: &ContractMetadata) -> String {
     let mut out = String::from(
         "from dataclasses import asdict, dataclass, is_dataclass\n\
@@ -1417,41 +1485,6 @@ fn rust_type(type_name: &str) -> String {
     }
 }
 
-fn ts_type(type_name: &str) -> String {
-    match type_name {
-        "bool" => "boolean".to_string(),
-        "u32" | "i32" | "u64" | "i64" | "u128" | "i128" => "number | bigint".to_string(),
-        "String" | "Symbol" | "Address" => "string".to_string(),
-        "Bytes" => "Uint8Array".to_string(),
-        "()" => "void".to_string(),
-        "Val" => "number".to_string(),
-        "Error" => "string".to_string(),
-        "U256" | "I256" => "string".to_string(),
-        _ => {
-            // Handle complex types
-            if type_name.starts_with("Option<") {
-                let inner = &type_name[7..type_name.len() - 1]; // Remove "Option<>"
-                format!("{} | null", ts_type(inner))
-            } else if type_name.starts_with("Result<") {
-                "any".to_string()
-            } else if type_name.starts_with("Vec<") {
-                let inner = &type_name[4..type_name.len() - 1]; // Remove "Vec<>"
-                format!("Array<{}>", ts_type(inner))
-            } else if type_name.starts_with("Map<") {
-                "Record<string, any>".to_string()
-            } else if type_name.starts_with("BytesN<") {
-                "Uint8Array".to_string()
-            } else if type_name.starts_with("(") && type_name.ends_with(")") {
-                // Tuple type
-                "any[]".to_string()
-            } else {
-                // Custom type
-                type_name.to_string()
-            }
-        }
-    }
-}
-
 fn python_type(type_name: &str) -> String {
     match type_name {
         "bool" => "bool".to_string(),
@@ -1566,6 +1599,8 @@ pub fn complex_metadata() -> ContractMetadata {
                     },
                 ],
                 output: Some("Result<(), Error>".to_string()),
+                doc: "Transfer `amount` from `from` to `to`.\nFails with `TransferError` codes."
+                    .to_string(),
             },
             ContractFunction {
                 name: "balance_of".to_string(),
@@ -1574,11 +1609,13 @@ pub fn complex_metadata() -> ContractMetadata {
                     type_name: "Address".to_string(),
                 }],
                 output: Some("u128".to_string()),
+                doc: "Returns the balance held by `owner`.".to_string(),
             },
             ContractFunction {
                 name: "get_metadata".to_string(),
                 inputs: vec![],
                 output: Some("TokenMetadata".to_string()),
+                doc: "Returns the token metadata.".to_string(),
             },
             ContractFunction {
                 name: "batch_transfer".to_string(),
@@ -1593,6 +1630,7 @@ pub fn complex_metadata() -> ContractMetadata {
                     },
                 ],
                 output: Some("Vec<Result<(), Error>>".to_string()),
+                doc: String::new(),
             },
             ContractFunction {
                 name: "set_config".to_string(),
@@ -1607,6 +1645,7 @@ pub fn complex_metadata() -> ContractMetadata {
                     },
                 ],
                 output: None,
+                doc: String::new(),
             },
         ],
         structs: vec![
@@ -1663,14 +1702,17 @@ pub fn complex_metadata() -> ContractMetadata {
                 ContractVariant {
                     name: "InsufficientBalance".to_string(),
                     type_name: None,
+                    value: None,
                 },
                 ContractVariant {
                     name: "Unauthorized".to_string(),
                     type_name: Some("Address".to_string()),
+                    value: None,
                 },
                 ContractVariant {
                     name: "InvalidAmount".to_string(),
                     type_name: Some("u128".to_string()),
+                    value: None,
                 },
             ],
         }],
@@ -1688,6 +1730,46 @@ pub fn complex_metadata() -> ContractMetadata {
                 ContractField {
                     name: "amount".to_string(),
                     type_name: "u128".to_string(),
+                },
+            ],
+        }],
+        unions: vec![ContractEnum {
+            name: "DataKey".to_string(),
+            variants: vec![
+                ContractVariant {
+                    name: "Admin".to_string(),
+                    type_name: None,
+                    value: None,
+                },
+                ContractVariant {
+                    name: "Balance".to_string(),
+                    type_name: Some("Address".to_string()),
+                    value: None,
+                },
+                ContractVariant {
+                    name: "Allowance".to_string(),
+                    type_name: Some("(Address, Address)".to_string()),
+                    value: None,
+                },
+            ],
+        }],
+        errors: vec![ContractErrorEnum {
+            name: "TransferError".to_string(),
+            cases: vec![
+                ContractErrorCase {
+                    name: "InsufficientFunds".to_string(),
+                    value: 1,
+                    doc: "Sender balance is lower than the requested amount".to_string(),
+                },
+                ContractErrorCase {
+                    name: "Frozen".to_string(),
+                    value: 2,
+                    doc: String::new(),
+                },
+                ContractErrorCase {
+                    name: "LimitExceeded".to_string(),
+                    value: 10,
+                    doc: "Transfer exceeds the configured daily limit".to_string(),
                 },
             ],
         }],

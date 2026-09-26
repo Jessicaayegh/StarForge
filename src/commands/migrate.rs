@@ -58,6 +58,10 @@ pub enum MigrateCommands {
     Docs(DocsArgs),
     /// Diff two state snapshots to show what changed between versions
     Diff(DiffArgs),
+    /// Introspect storage layout of a contract file
+    Introspect(IntrospectArgs),
+    /// Analyze storage layout differences and hazards between two contract versions
+    Hazards(HazardsArgs),
 }
 
 #[derive(Args)]
@@ -598,6 +602,32 @@ pub fn validate_snapshot(snapshot: &StorageSnapshot, rules: &MigrationRules) -> 
 
 // ── Command handlers ──────────────────────────────────────────────────────────
 
+
+#[derive(Args)]
+pub struct IntrospectArgs {
+    /// Path to contract source (.rs) or layout (.json) file
+    pub contract: PathBuf,
+    /// Output introspected layout as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args)]
+pub struct HazardsArgs {
+    /// Path to base/old contract source (.rs) or layout (.json) file
+    #[arg(long)]
+    pub old: PathBuf,
+    /// Path to target/new contract source (.rs) or layout (.json) file
+    #[arg(long)]
+    pub new: PathBuf,
+    /// Output hazard report as JSON
+    #[arg(long)]
+    pub json: bool,
+    /// Generate starter migration rules file if hazards are detected
+    #[arg(long)]
+    pub output_rules: Option<PathBuf>,
+}
+
 pub fn handle(cmd: MigrateCommands) -> Result<()> {
     match cmd {
         MigrateCommands::Snapshot(args) => handle_snapshot(args),
@@ -611,6 +641,8 @@ pub fn handle(cmd: MigrateCommands) -> Result<()> {
         MigrateCommands::History(args) => handle_history(args),
         MigrateCommands::Docs(args) => handle_docs(args),
         MigrateCommands::Diff(args) => handle_diff(args),
+        MigrateCommands::Introspect(args) => handle_introspect(args),
+        MigrateCommands::Hazards(args) => handle_hazards(args),
     }
 }
 
@@ -1656,4 +1688,69 @@ mod tests {
         let restored = load_snapshot(&restored_file).unwrap();
         assert_eq!(snapshot_checksum(&snap), snapshot_checksum(&restored));
     }
+}
+
+fn handle_introspect(args: IntrospectArgs) -> Result<()> {
+    let layout = crate::utils::storage_layout::StorageLayoutIntrospector::introspect_file(&args.contract)?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&layout)?);
+    } else {
+        p::header(&format!("Storage Layout: {}", layout.contract_name));
+        p::separator();
+        if let Some(v) = &layout.version {
+            p::kv("Version", v);
+        }
+        p::kv("Total Keys", &layout.keys.len().to_string());
+        p::kv("DataKey Variants", &layout.variants.len().to_string());
+        p::separator();
+        println!();
+        println!("Storage Keys:");
+        for k in &layout.keys {
+            println!("  - {} [tier: {}, type: {}]", k.name, k.storage_tier, k.value_type);
+        }
+    }
+    Ok(())
+}
+
+fn handle_hazards(args: HazardsArgs) -> Result<()> {
+    let old_layout = crate::utils::storage_layout::StorageLayoutIntrospector::introspect_file(&args.old)?;
+    let new_layout = crate::utils::storage_layout::StorageLayoutIntrospector::introspect_file(&args.new)?;
+    let report = crate::utils::storage_layout::StorageLayoutIntrospector::compare_layouts(&old_layout, &new_layout);
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        p::header("Migration Storage Hazard Analysis");
+        p::separator();
+        p::kv("From Contract", &report.from_contract);
+        p::kv("To Contract", &report.to_contract);
+        p::kv("Status", if report.is_safe { "SAFE" } else { "HAZARDS DETECTED" });
+        p::kv("Breaking Hazards", &report.breaking_count.to_string());
+        p::kv("Warnings", &report.warning_count.to_string());
+        p::separator();
+        println!();
+
+        if report.hazards.is_empty() {
+            p::success("No storage migration hazards detected. Layouts are fully compatible.");
+        } else {
+            for h in &report.hazards {
+                let badge = match h.severity {
+                    crate::utils::storage_layout::HazardSeverity::Breaking => "[BREAKING]".red().bold(),
+                    crate::utils::storage_layout::HazardSeverity::HighRisk => "[HIGH RISK]".red(),
+                    crate::utils::storage_layout::HazardSeverity::Warning => "[WARNING]".yellow(),
+                    crate::utils::storage_layout::HazardSeverity::Info => "[INFO]".cyan(),
+                };
+                println!("{} {}: {}", badge, h.key, h.message);
+                println!("   Mitigation: {}", h.suggested_mitigation);
+                println!();
+            }
+        }
+    }
+
+    if let Some(out) = args.output_rules {
+        fs::write(&out, serde_json::to_string_pretty(&report.starter_migration_rules)?)?;
+        p::success(&format!("Wrote starter migration rules to {}", out.display()));
+    }
+
+    Ok(())
 }

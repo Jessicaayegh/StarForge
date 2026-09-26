@@ -17,13 +17,13 @@ pub enum ConfigCommands {
     /// Set global wallet encryption parameters (Argon2id)
     SetEncryption {
         /// Argon2 memory cost in KiB (e.g. 65536)
-        #[arg(long)]
+        #[arg(long, hide = true)]
         mem: Option<u32>,
         /// Argon2 iteration count (e.g. 3)
-        #[arg(long)]
+        #[arg(long, hide = true)]
         iterations: Option<u32>,
         /// Argon2 parallelism factor (e.g. 4)
-        #[arg(long)]
+        #[arg(long, hide = true)]
         parallelism: Option<u32>,
         /// Reset to library defaults
         #[arg(long, default_value = "false")]
@@ -120,7 +120,7 @@ fn db_init() -> Result<()> {
     let path = crate::utils::database::db_path();
     p::kv("Database path", &path.display().to_string());
 
-    let db = crate::utils::crate::utils::database::Database::open()?;
+    let db = crate::utils::database::Database::open()?;
     db.initialize()?;
 
     p::success("SQLite database initialized successfully.");
@@ -132,10 +132,10 @@ fn db_init() -> Result<()> {
 fn db_migrate() -> Result<()> {
     p::header("TOML → SQLite Migration");
 
-    let db = crate::utils::crate::utils::database::Database::open()?;
+    let db = crate::utils::database::Database::open()?;
     db.initialize()?;
 
-    let report = crate::utils::crate::utils::database::migrate_from_toml(&db)?;
+    let report = crate::utils::database::migrate_from_toml(&db)?;
 
     p::separator();
     p::kv("Wallets migrated", &report.wallets_migrated.to_string());
@@ -156,7 +156,7 @@ fn db_query(sql: &str) -> Result<()> {
         anyhow::bail!("Only SELECT queries are allowed via `config db query` for safety.");
     }
 
-    let db = crate::utils::crate::utils::database::Database::open()?;
+    let db = crate::utils::database::Database::open()?;
     let result = db.execute_query(sql)?;
 
     if result.rows.is_empty() {
@@ -207,7 +207,7 @@ fn db_query(sql: &str) -> Result<()> {
 fn db_backup(dest: &str) -> Result<()> {
     p::header("Database Backup");
     let dest_path = std::path::Path::new(dest);
-    let db = crate::utils::crate::utils::database::Database::open()?;
+    let db = crate::utils::database::Database::open()?;
     db.backup(dest_path)?;
     p::kv("Backup saved", dest);
     p::success("Database backup complete.");
@@ -217,7 +217,7 @@ fn db_backup(dest: &str) -> Result<()> {
 fn db_restore(src: &str) -> Result<()> {
     p::header("Database Restore");
     let src_path = std::path::Path::new(src);
-    crate::utils::crate::utils::database::restore_database(src_path)?;
+    crate::utils::database::restore_database(src_path)?;
     p::kv("Restored from", src);
     p::success("Database restore complete.");
     Ok(())
@@ -226,8 +226,8 @@ fn db_restore(src: &str) -> Result<()> {
 fn db_export(out: Option<&str>) -> Result<()> {
     p::header("Database → TOML Export");
 
-    let db = crate::utils::crate::utils::database::Database::open()?;
-    let toml_str = crate::utils::crate::utils::database::export_to_toml(&db)?;
+    let db = crate::utils::database::Database::open()?;
+    let toml_str = crate::utils::database::export_to_toml(&db)?;
 
     if let Some(path) = out {
         std::fs::write(path, &toml_str)?;
@@ -257,7 +257,7 @@ fn db_status() -> Result<()> {
         return Ok(());
     }
 
-    let db = crate::utils::crate::utils::database::Database::open()?;
+    let db = crate::utils::database::Database::open()?;
     let stats = db.stats()?;
 
     p::separator();
@@ -274,7 +274,7 @@ fn db_status() -> Result<()> {
 fn db_check() -> Result<()> {
     p::header("Database Integrity Check");
 
-    let db = crate::utils::crate::utils::database::Database::open()?;
+    let db = crate::utils::database::Database::open()?;
     let results = db.integrity_check()?;
 
     for line in &results {
@@ -288,7 +288,10 @@ fn db_check() -> Result<()> {
 }
 
 fn show() -> Result<()> {
-    let cfg = config::load()?;
+    // Show the *effective* config: user config with the project lockfile
+    // applied when one is discovered, so what the user sees is what the CLI
+    // uses in this directory (#805).
+    let cfg = crate::utils::project_config::load_effective()?;
     p::header("StarForge Configuration");
     p::separator();
 
@@ -296,6 +299,17 @@ fn show() -> Result<()> {
         "Config database",
         &database::db_path().display().to_string(),
     );
+    // Surface whether a project lockfile is participating, so an override is
+    // never mistaken for the user's own setting.
+    match crate::utils::project_config::find_and_load_project_lockfile(
+        &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+    ) {
+        Ok(Some((path, _))) => p::kv(
+            "Project lockfile",
+            &format!("{} (project overrides applied)", path.display()),
+        ),
+        _ => p::kv("Project lockfile", "none found"),
+    }
     p::kv("Active network", &cfg.network);
     p::kv(
         "Telemetry",

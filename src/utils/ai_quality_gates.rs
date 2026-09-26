@@ -1,14 +1,87 @@
 //! Configurable, CI-friendly AI quality gates.
 
-use crate::utils::{ai_documentation_assistant, quality_analysis};
+use crate::utils::{ai_documentation_assistant, quality_analysis, redaction::redact_secrets};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Quality gate preset profiles for CI/CD and PR automation workflows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum QualityGatePreset {
+    /// Relaxed thresholds for legacy repos or early-stage development.
+    Conservative,
+    /// Balanced standard recommended for general Soroban smart contract development.
+    Default,
+    /// High-assurance thresholds for financial-grade and mainnet-targeted contracts.
+    Strict,
+}
+
+impl QualityGatePreset {
+    /// Generate the full `QualityGateConfig` for this preset.
+    pub fn config(&self) -> QualityGateConfig {
+        match self {
+            QualityGatePreset::Conservative => QualityGateConfig {
+                preset: Some(*self),
+                minimum_quality_score: 50,
+                maximum_unwraps: 10,
+                maximum_todos: 10,
+                maximum_high_security_findings: 0,
+                maximum_medium_security_findings: 10,
+                maximum_unbounded_loops: 2,
+                maximum_storage_ops_in_loops: 2,
+                minimum_coverage_percent: 50.0,
+                minimum_documentation_percent: 50.0,
+                maximum_benchmark_ms: None,
+                allowed_licenses: vec![
+                    "MIT".into(),
+                    "Apache-2.0".into(),
+                    "BSD-3-Clause".into(),
+                    "ISC".into(),
+                    "Unlicense".into(),
+                ],
+                custom_gates: Vec::new(),
+            },
+            QualityGatePreset::Default => QualityGateConfig {
+                preset: Some(*self),
+                minimum_quality_score: 70,
+                maximum_unwraps: 0,
+                maximum_todos: 0,
+                maximum_high_security_findings: 0,
+                maximum_medium_security_findings: 5,
+                maximum_unbounded_loops: 0,
+                maximum_storage_ops_in_loops: 0,
+                minimum_coverage_percent: 80.0,
+                minimum_documentation_percent: 80.0,
+                maximum_benchmark_ms: None,
+                allowed_licenses: vec!["MIT".into(), "Apache-2.0".into(), "BSD-3-Clause".into()],
+                custom_gates: Vec::new(),
+            },
+            QualityGatePreset::Strict => QualityGateConfig {
+                preset: Some(*self),
+                minimum_quality_score: 90,
+                maximum_unwraps: 0,
+                maximum_todos: 0,
+                maximum_high_security_findings: 0,
+                maximum_medium_security_findings: 0,
+                maximum_unbounded_loops: 0,
+                maximum_storage_ops_in_loops: 0,
+                minimum_coverage_percent: 90.0,
+                minimum_documentation_percent: 95.0,
+                maximum_benchmark_ms: Some(100.0),
+                allowed_licenses: vec!["MIT".into(), "Apache-2.0".into(), "BSD-3-Clause".into()],
+                custom_gates: Vec::new(),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct QualityGateConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preset: Option<QualityGatePreset>,
     pub minimum_quality_score: u8,
     pub maximum_unwraps: usize,
     pub maximum_todos: usize,
@@ -25,20 +98,7 @@ pub struct QualityGateConfig {
 
 impl Default for QualityGateConfig {
     fn default() -> Self {
-        Self {
-            minimum_quality_score: 70,
-            maximum_unwraps: 0,
-            maximum_todos: 0,
-            maximum_high_security_findings: 0,
-            maximum_medium_security_findings: 5,
-            maximum_unbounded_loops: 0,
-            maximum_storage_ops_in_loops: 0,
-            minimum_coverage_percent: 80.0,
-            minimum_documentation_percent: 80.0,
-            maximum_benchmark_ms: None,
-            allowed_licenses: vec!["MIT".into(), "Apache-2.0".into(), "BSD-3-Clause".into()],
-            custom_gates: Vec::new(),
-        }
+        QualityGatePreset::Default.config()
     }
 }
 
@@ -85,6 +145,10 @@ pub fn load_config(path: &Path) -> Result<QualityGateConfig> {
 }
 
 pub fn write_default_config(path: &Path) -> Result<()> {
+    write_preset_config(path, QualityGatePreset::Default)
+}
+
+pub fn write_preset_config(path: &Path, preset: QualityGatePreset) -> Result<()> {
     if path.exists() {
         anyhow::bail!(
             "Quality gate configuration already exists: {}",
@@ -94,7 +158,8 @@ pub fn write_default_config(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(path, toml::to_string_pretty(&QualityGateConfig::default())?)?;
+    let config = preset.config();
+    fs::write(path, toml::to_string_pretty(&config)?)?;
     Ok(())
 }
 
@@ -240,8 +305,9 @@ pub fn evaluate(
     results.push(license_gate(&root, config)?);
     results.extend(custom_gate_results(&root, &source, &config.custom_gates));
 
-    let passed = results.iter().all(|result| result.passed);
-    Ok(QualityGateReport {
+    let passed = results.iter().all(|r| r.passed);
+
+    let mut report = QualityGateReport {
         passed,
         project: root,
         quality_score: quality.overall_score,
@@ -249,7 +315,49 @@ pub fn evaluate(
         documentation_percent: docs.completeness_percent,
         results,
         generated_at: chrono::Utc::now().to_rfc3339(),
-    })
+    };
+    redact_report(&mut report);
+    Ok(report)
+}
+
+/// Scrub any secret keys, mnemonics, tokens, or private credentials from the quality gate report.
+pub fn redact_report(report: &mut QualityGateReport) {
+    for res in &mut report.results {
+        res.category = redact_secrets(&res.category);
+        res.gate = redact_secrets(&res.gate);
+        res.actual = redact_secrets(&res.actual);
+        res.expected = redact_secrets(&res.expected);
+        res.remediation = redact_secrets(&res.remediation);
+    }
+}
+
+/// Format failing gates as GitHub Actions workflow commands (`::error` / `::warning`)
+/// with guaranteed secret redaction to prevent accidental secret leakage in PR checks.
+pub fn format_github_annotations(report: &QualityGateReport) -> Vec<String> {
+    let mut annotations = Vec::new();
+    let project_str = report.project.to_string_lossy();
+    let safe_file = if project_str.is_empty() || project_str == "." {
+        "Cargo.toml".to_string()
+    } else {
+        format!("{}/Cargo.toml", redact_secrets(&project_str))
+    };
+
+    for res in &report.results {
+        if !res.passed {
+            let cat = redact_secrets(&res.category);
+            let gate = redact_secrets(&res.gate);
+            let actual = redact_secrets(&res.actual);
+            let expected = redact_secrets(&res.expected);
+            let remediation = redact_secrets(&res.remediation);
+            let msg = format!(
+                "Quality gate failed: [{cat}] {gate} (actual: {actual}, expected: {expected}). Remediation: {remediation}"
+            );
+            annotations.push(format!(
+                "::error file={safe_file},title=Quality Gate [{cat} - {gate}]::{msg}"
+            ));
+        }
+    }
+    annotations
 }
 
 fn push_max(
@@ -267,12 +375,12 @@ fn push_max(
         actual <= threshold
     };
     results.push(GateResult {
-        category: category.into(),
-        gate: gate.into(),
+        category: redact_secrets(category),
+        gate: redact_secrets(gate),
         passed,
-        actual: format!("{actual:.2}"),
-        expected: format!("{} {threshold:.2}", if minimum { ">=" } else { "<=" }),
-        remediation: remediation.into(),
+        actual: redact_secrets(&format!("{actual:.2}")),
+        expected: redact_secrets(&format!("{} {threshold:.2}", if minimum { ">=" } else { "<=" })),
+        remediation: redact_secrets(remediation),
     });
 }
 
@@ -301,8 +409,8 @@ fn license_gate(root: &Path, config: &QualityGateConfig) -> Result<GateResult> {
         category: "licensing".into(),
         gate: "package license".into(),
         passed,
-        actual: license.unwrap_or_else(|| "missing".into()),
-        expected: format!("one of: {}", config.allowed_licenses.join(", ")),
+        actual: redact_secrets(&license.unwrap_or_else(|| "missing".into())),
+        expected: redact_secrets(&format!("one of: {}", config.allowed_licenses.join(", "))),
         remediation: "Set package.license in Cargo.toml to an approved SPDX expression.".into(),
     })
 }
@@ -320,11 +428,11 @@ fn custom_gate_results(root: &Path, source: &str, gates: &[CustomGate]) -> Vec<G
             };
             GateResult {
                 category: "custom".into(),
-                gate: gate.name.clone(),
+                gate: redact_secrets(&gate.name),
                 passed: matched || !gate.required,
                 actual: if matched { "matched" } else { "not matched" }.into(),
-                expected: format!("{} {}", gate.rule, gate.value),
-                remediation: format!("Satisfy custom gate `{}`.", gate.name),
+                expected: redact_secrets(&format!("{} {}", gate.rule, gate.value)),
+                remediation: redact_secrets(&format!("Satisfy custom gate `{}`.", gate.name)),
             }
         })
         .collect()
@@ -409,5 +517,69 @@ mod tests {
         write_default_config(&path).unwrap();
         let loaded = load_config(&path).unwrap();
         assert_eq!(loaded.minimum_quality_score, 70);
+    }
+
+    #[test]
+    fn presets_validate_proper_threshold_hierarchies() {
+        let conservative = QualityGatePreset::Conservative.config();
+        let default = QualityGatePreset::Default.config();
+        let strict = QualityGatePreset::Strict.config();
+
+        assert!(conservative.minimum_quality_score < default.minimum_quality_score);
+        assert!(default.minimum_quality_score < strict.minimum_quality_score);
+
+        assert!(conservative.minimum_coverage_percent < default.minimum_coverage_percent);
+        assert!(default.minimum_coverage_percent < strict.minimum_coverage_percent);
+
+        assert!(conservative.maximum_unwraps > default.maximum_unwraps);
+        assert_eq!(strict.maximum_unwraps, 0);
+        assert_eq!(strict.maximum_medium_security_findings, 0);
+    }
+
+    #[test]
+    fn preset_configs_serialize_and_load_cleanly() {
+        let temp = tempfile::tempdir().unwrap();
+        for preset in [
+            QualityGatePreset::Conservative,
+            QualityGatePreset::Default,
+            QualityGatePreset::Strict,
+        ] {
+            let filename = format!("gates-{:?}.toml", preset);
+            let path = temp.path().join(filename);
+            write_preset_config(&path, preset).unwrap();
+            let loaded = load_config(&path).unwrap();
+            assert_eq!(loaded.preset, Some(preset));
+        }
+    }
+
+    #[test]
+    fn secret_redaction_prevents_leaks_in_annotations_and_reports() {
+        let mut report = QualityGateReport {
+            passed: false,
+            project: PathBuf::from("."),
+            quality_score: 50,
+            coverage_percent: 50.0,
+            documentation_percent: 50.0,
+            results: vec![GateResult {
+                category: "security".into(),
+                gate: "secret check".into(),
+                passed: false,
+                actual: "Found secret SDJ34K5N6P7Q2R3S4T5U2V3W4X5Y6Z7A2B3C4D5E2F3G4H5I6J7K2L3M in config".into(),
+                expected: "No secrets".into(),
+                remediation: "Remove token ghp_1234567890abcdef1234567890abcdef123456".into(),
+            }],
+            generated_at: "2026-01-01T00:00:00Z".into(),
+        };
+
+        redact_report(&mut report);
+        assert!(!report.results[0].actual.contains("SDJ34K5N6P7Q2R3S4T5U2V3W4X5Y6Z7A2B3C4D5E2F3G4H5I6J7K2L3M"));
+        assert!(report.results[0].actual.contains("[REDACTED]"));
+        assert!(!report.results[0].remediation.contains("ghp_1234567890abcdef"));
+
+        let annotations = format_github_annotations(&report);
+        assert_eq!(annotations.len(), 1);
+        assert!(!annotations[0].contains("SDJ34K5N6P7Q2R3S4T5U2V3W4X5Y6Z7A2B3C4D5E2F3G4H5I6J7K2L3M"));
+        assert!(annotations[0].contains("::error file="));
+        assert!(annotations[0].contains("[REDACTED]"));
     }
 }

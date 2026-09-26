@@ -63,6 +63,12 @@
           "type": "string",
           "stability": "stable",
           "description": "Decoded storage value."
+        },
+        {
+          "path": "metadata",
+          "type": "object|string|null",
+          "stability": "stable",
+          "description": "Build provenance metadata reported by the contract WASM, when available."
         }
       ]
     },
@@ -163,4 +169,3 @@
     }
   }
 }
-

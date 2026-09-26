@@ -2,11 +2,36 @@
 
 StarForge provides a consistent CI/CD deployment interface for GitHub Actions, GitLab CI, and Jenkins. Each provider runs the same quality gate before it can deploy and delegates infrastructure-specific work to protected CI secrets.
 
+## Pipeline Overview (GitHub Actions)
+
+The full CI/CD pipeline (tests on Linux/macOS/Windows, coverage, security
+scanning, multi-platform release builds and automated releases) is mapped job
+by job in [CI_ENFORCEMENT.md, CI/CD Pipeline Map](CI_ENFORCEMENT.md#cicd-pipeline-map).
+In short:
+
+| Stage | Workflow |
+| --- | --- |
+| Test (Linux, macOS, Windows, MSRV 1.80) | `ci.yml` |
+| Coverage (`cargo llvm-cov`, LCOV/JSON/HTML artifact) | `coverage.yml` |
+| Security scanning (cargo-deny, cargo-audit, dependency review, CodeQL, Dependabot) | `ci.yml`, `audit.yml`, `codeql.yml`, `.github/dependabot.yml` |
+| Release binaries + checksums + GitHub Release + Homebrew | `release.yml` (on `v*` tags; `workflow_dispatch` is a dry run) |
+| Deploy / rollback | `deployment.yml` (manual, reuses `ci.yml` as its gate) |
+
+Optional repository settings used by the pipeline:
+
+| Name | Kind | Purpose |
+| --- | --- | --- |
+| `CODECOV_TOKEN` | secret | Enables the Codecov upload in `coverage.yml`; the artifact is produced either way. |
+| `COVERAGE_THRESHOLD` | variable | Minimum line coverage % enforced by `coverage.yml` (unset means report only). |
+| `SLACK_WEBHOOK_URL` | secret | Notifications from the contract test / monitoring workflows. |
+
 ## Quality Gate
 
 The deployment pipelines require:
 
-- `cargo fmt --all --check`
+- `cargo fmt --all --check` (Jenkins and GitLab only for now; GitHub reports
+  formatting drift as a warning until `master` is rustfmt-clean, see
+  `CI_ENFORCEMENT.md`)
 - `cargo build --locked`
 - `cargo test --locked`
 - `cargo clippy --all-features --locked -- -D warnings`
