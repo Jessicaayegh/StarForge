@@ -385,9 +385,12 @@ enum Commands {
     #[command(subcommand)]
     AiSecurityTraining(commands::ai_security_training::AiSecurityTrainingCommands),
 
-    /// Contract health monitoring, performance tracking, security events, alerting, and dashboard
     #[command(subcommand)]
     ContractMonitor(commands::contract_monitor::ContractMonitorCommands),
+
+    /// Terminal User Interface for wallets, contracts, and transactions
+    #[cfg(feature = "ui")]
+    Ui(commands::ui::UiArgs),
 }
 
 static OUTPUT_MODE_INIT: Once = Once::new();
@@ -549,6 +552,8 @@ async fn run() {
         Commands::Optimize(_) => "optimize",
         Commands::AiSecurityTraining(_) => "ai-security-training",
         Commands::ContractMonitor(_) => "contract-monitor",
+        #[cfg(feature = "ui")]
+        Commands::Ui(_) => "ui",
     }
     .to_string();
 
@@ -664,6 +669,8 @@ async fn run() {
         Commands::Optimize(cmd) => commands::optimize::handle(cmd).await,
         Commands::AiSecurityTraining(cmd) => commands::ai_security_training::handle(cmd).await,
         Commands::ContractMonitor(cmd) => commands::contract_monitor::handle(cmd).await,
+        #[cfg(feature = "ui")]
+        Commands::Ui(args) => commands::ui::handle(args).await,
     };
     let duration = start.elapsed();
 
