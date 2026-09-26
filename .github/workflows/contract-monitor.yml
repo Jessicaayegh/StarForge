@@ -24,6 +24,10 @@ jobs:
   monitor:
     name: Monitor Contract Health
     runs-on: ubuntu-latest
+    # `secrets` is not available in step-level `if:`; expose it via env instead.
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -53,7 +57,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
       - name: Notify on anomaly
-        if: ${{ failure() && secrets.SLACK_WEBHOOK_URL != '' }}
+        if: ${{ failure() && env.SLACK_WEBHOOK_URL != '' }}
         uses: slackapi/slack-github-action@v1
         with:
           payload: |
@@ -68,6 +72,3 @@ jobs:
                 ]
               }]
             }
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

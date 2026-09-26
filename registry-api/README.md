@@ -56,6 +56,10 @@ All template mutation operations (`POST /api/templates/publish`, `POST /api/temp
 
 ## API Endpoints
 
+The complete OpenAPI 3.0 contract is available in [`openapi.json`](./openapi.json)
+and as an asset on each GitHub release at
+[releases/latest/download/openapi.json](https://github.com/Nanle-code/StarForge/releases/latest/download/openapi.json).
+
 ### Authentication
 
 - `POST /api/auth/signup` - Create account

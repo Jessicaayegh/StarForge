@@ -83,6 +83,7 @@ Global options: `--json`, `--quiet`/`-q`, `--log-format`, `--log-dir`, `--correl
 | `registry` | Interact with the remote template registry |
 | `schedule` | Schedule deployments for future execution with approval workflows |
 | `security` | Security hardening, validation, and monitoring |
+| `sep10` | SEP-10 web authentication for Stellar anchors |
 | `shell` | Interactive REPL for local Soroban contract testing |
 | `simulate` | Local network simulation and testing environment |
 | `telemetry` | Manage telemetry settings directly |
@@ -146,11 +147,17 @@ Global options: `--json`, `--quiet`/`-q`, `--log-format`, `--log-dir`, `--correl
 | `add` | Add a custom network endpoint |
 | `test` | Test connectivity to a network |
 
+## `sep10` subcommands
+
+| Subcommand | Description |
+|---|---|
+| `auth <--domain <HOME_DOMAIN>> <--wallet <NAME>>` | Validate, sign, and exchange a SEP-10 challenge for a session JWT |
+
 ## `config` subcommands
 
 | Subcommand | Description |
 |---|---|
-| `show` | Show current global configuration |
+| `show` | Show effective configuration (user config + project lockfile) |
 | `set <KEY> <VALUE>` | Set a configuration key/value pair |
 | `set-encryption` | Set global wallet encryption parameters (Argon2id) |
 | `doctor` | Validate configuration and check network connectivity |
@@ -188,6 +195,16 @@ Global options: `--json`, `--quiet`/`-q`, `--log-format`, `--log-dir`, `--correl
 | `analyse <WASM>` | Heuristic gas/cpu report |
 | `optimize` | Lightweight WASM shrink pass |
 | `diff <OLD> <NEW>` | Compare estimated costs |
+
+## `optimize` subcommands
+
+| Subcommand | Description |
+|---|---|
+| `analyse <WASM>` | WASM performance issues + score |
+| `size --wasm <FILE>` | Section breakdown + size budgets (--budget, --fail-on-overage) |
+| `transform --src <FILE>` | Apply code transformation hints |
+| `bench` | Benchmark two WASM binaries |
+| `report` | Show the last optimization report |
 
 ## `security` subcommands
 
@@ -281,4 +298,10 @@ Global options: `--json`, `--quiet`/`-q`, `--log-format`, `--log-dir`, `--correl
 | `extract <PATH>` | Extract rustdoc comments |
 | `show / list / search` | Browse the local docs store |
 | `html / api-ref / publish` | HTML site and publishing helpers |
+
+## `sep10` subcommands
+
+| Subcommand | Description |
+|---|---|
+| `auth --domain <DOMAIN> --wallet <NAME>` | Authenticate against a SEP-10 server and print the JWT (--verbose, --toml-url) |
 

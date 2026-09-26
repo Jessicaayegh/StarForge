@@ -17,13 +17,13 @@ pub enum ConfigCommands {
     /// Set global wallet encryption parameters (Argon2id)
     SetEncryption {
         /// Argon2 memory cost in KiB (e.g. 65536)
-        #[arg(long)]
+        #[arg(long, hide = true)]
         mem: Option<u32>,
         /// Argon2 iteration count (e.g. 3)
-        #[arg(long)]
+        #[arg(long, hide = true)]
         iterations: Option<u32>,
         /// Argon2 parallelism factor (e.g. 4)
-        #[arg(long)]
+        #[arg(long, hide = true)]
         parallelism: Option<u32>,
         /// Reset to library defaults
         #[arg(long, default_value = "false")]
@@ -288,7 +288,10 @@ fn db_check() -> Result<()> {
 }
 
 fn show() -> Result<()> {
-    let cfg = config::load()?;
+    // Show the *effective* config: user config with the project lockfile
+    // applied when one is discovered, so what the user sees is what the CLI
+    // uses in this directory (#805).
+    let cfg = crate::utils::project_config::load_effective()?;
     p::header("StarForge Configuration");
     p::separator();
 
@@ -296,6 +299,17 @@ fn show() -> Result<()> {
         "Config database",
         &database::db_path().display().to_string(),
     );
+    // Surface whether a project lockfile is participating, so an override is
+    // never mistaken for the user's own setting.
+    match crate::utils::project_config::find_and_load_project_lockfile(
+        &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+    ) {
+        Ok(Some((path, _))) => p::kv(
+            "Project lockfile",
+            &format!("{} (project overrides applied)", path.display()),
+        ),
+        _ => p::kv("Project lockfile", "none found"),
+    }
     p::kv("Active network", &cfg.network);
     p::kv(
         "Telemetry",

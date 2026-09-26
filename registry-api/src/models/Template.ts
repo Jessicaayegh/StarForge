@@ -13,6 +13,8 @@ export interface ITemplate {
   repository?: string;
   homepage?: string;
   documentation?: string;
+  /** Markdown README displayed by the public registry portal. */
+  readme?: string;
   downloads: number;
   verified: boolean;
   publisherId: string;
@@ -74,7 +76,7 @@ export class TemplateStore {
     query: string,
     tags?: string[],
     verified?: boolean,
-    minQuality?: number,
+    _minQuality?: number,
   ): Promise<ITemplate[]> {
     const results: ITemplate[] = [];
     const queryLower = query.toLowerCase();
@@ -181,4 +183,3 @@ export class TemplateStore {
     this.templates.clear();
   }
 }
-

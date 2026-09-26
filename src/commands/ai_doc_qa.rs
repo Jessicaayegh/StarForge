@@ -45,6 +45,14 @@ pub enum AiDocQaCommands {
         /// Print the answer as JSON
         #[arg(long)]
         json: bool,
+
+        /// Output only JSON citation objects for IDE integrations
+        #[arg(long)]
+        citations_only: bool,
+
+        /// Strict citation verification mode
+        #[arg(long)]
+        citation_mode: bool,
     },
 
     /// Start an interactive chat session with follow-up support
@@ -95,12 +103,16 @@ pub async fn handle(cmd: AiDocQaCommands) -> Result<()> {
             session,
             language,
             json,
+            citations_only,
+            citation_mode,
         } => {
             handle_ask(
                 &question.join(" "),
                 session.as_deref(),
                 language.as_deref(),
                 json,
+                citations_only,
+                citation_mode,
             )
             .await
         }
@@ -167,6 +179,8 @@ async fn handle_ask(
     session_id: Option<&str>,
     language: Option<&str>,
     json: bool,
+    citations_only: bool,
+    citation_mode: bool,
 ) -> Result<()> {
     if question.trim().is_empty() {
         anyhow::bail!("Please provide a question, e.g. `starforge ai-doc-qa ask \"How do I deploy a contract?\"`");
@@ -199,9 +213,20 @@ async fn handle_ask(
         )
         .await?;
 
+    if citations_only {
+        println!("{}", serde_json::to_string_pretty(&answer.citations)?);
+        return Ok(());
+    }
+
     if json {
         println!("{}", serde_json::to_string_pretty(&answer)?);
     } else {
+        if answer.is_low_confidence {
+            p::warn("Note: Low confidence score. This answer may not be fully grounded in documentation.");
+        }
+        if citation_mode && answer.citations.is_empty() {
+            p::warn("Strict citation mode: No grounding sources were retrieved from the documentation index.");
+        }
         p::header("Documentation Answer");
         p::separator();
         p::kv("Question", question);

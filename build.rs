@@ -82,6 +82,8 @@ enum Commands {
     Telemetry,
     #[command(about = "Fetch a transaction for the account")]
     Tx,
+    #[command(about = "SEP-10 web authentication for Stellar anchors")]
+    Sep10,
     #[command(about = "View or switch the active network (testnet/mainnet)")]
     Network,
     #[command(about = "Local Soroban devnet (Docker quickstart)")]
@@ -325,9 +327,21 @@ const MAJOR_SUBCOMMANDS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "sep10",
+        &[
+            (
+                "auth <--domain <HOME_DOMAIN>> <--wallet <NAME>>",
+                "Validate, sign, and exchange a SEP-10 challenge for a session JWT",
+            ),
+        ],
+    ),
+    (
         "config",
         &[
-            ("show", "Show current global configuration"),
+            (
+                "show",
+                "Show effective configuration (user config + project lockfile)",
+            ),
             ("set <KEY> <VALUE>", "Set a configuration key/value pair"),
             (
                 "set-encryption",
@@ -372,6 +386,19 @@ const MAJOR_SUBCOMMANDS: &[(&str, &[(&str, &str)])] = &[
             ("analyse <WASM>", "Heuristic gas/cpu report"),
             ("optimize", "Lightweight WASM shrink pass"),
             ("diff <OLD> <NEW>", "Compare estimated costs"),
+        ],
+    ),
+    (
+        "optimize",
+        &[
+            ("analyse <WASM>", "WASM performance issues + score"),
+            (
+                "size --wasm <FILE>",
+                "Section breakdown + size budgets (--budget, --fail-on-overage)",
+            ),
+            ("transform --src <FILE>", "Apply code transformation hints"),
+            ("bench", "Benchmark two WASM binaries"),
+            ("report", "Show the last optimization report"),
         ],
     ),
     (
@@ -505,6 +532,13 @@ const MAJOR_SUBCOMMANDS: &[(&str, &[(&str, &str)])] = &[
             ),
         ],
     ),
+    (
+        "sep10",
+        &[(
+            "auth --domain <DOMAIN> --wallet <NAME>",
+            "Authenticate against a SEP-10 server and print the JWT (--verbose, --toml-url)",
+        )],
+    ),
 ];
 
 const SUBCOMMAND_INFO: &[(&str, &str)] = &[
@@ -549,6 +583,10 @@ const SUBCOMMAND_INFO: &[(&str, &str)] = &[
     ),
     ("telemetry", "Manage telemetry settings directly"),
     ("tx", "Fetch transaction for the account"),
+    (
+        "sep10",
+        "SEP-10 web authentication (anchor auth testing)",
+    ),
     (
         "network",
         "View or switch the active network (testnet/mainnet)",
@@ -646,6 +684,7 @@ const SUBCOMMAND_INFO: &[(&str, &str)] = &[
         "Contract health monitoring and alerting",
     ),
     ("man", "Generate or install man pages"),
+    ("sep10", "SEP-10 web authentication for Stellar anchors"),
 ];
 
 /// Render `docs/COMMAND_CHEATSHEET.md` from the clap `Command` tree so the

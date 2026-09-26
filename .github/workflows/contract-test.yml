@@ -31,6 +31,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: contract-test-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   unit-tests:
     name: Unit Tests
@@ -109,9 +113,13 @@ jobs:
     runs-on: ubuntu-latest
     needs: [unit-tests, lint-contract, gas-analysis, security-audit]
     if: always()
+    # `secrets` is not available in step-level `if:`; expose it via env instead.
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
     steps:
       - name: Notify on failure
-        if: ${{ contains(needs.*.result, 'failure') && secrets.SLACK_WEBHOOK_URL != '' }}
+        if: ${{ contains(needs.*.result, 'failure') && env.SLACK_WEBHOOK_URL != '' }}
         uses: slackapi/slack-github-action@v1
         with:
           payload: |
@@ -127,11 +135,8 @@ jobs:
                 ]
               }]
             }
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
       - name: Notify on success
-        if: ${{ !contains(needs.*.result, 'failure') && secrets.SLACK_WEBHOOK_URL != '' }}
+        if: ${{ !contains(needs.*.result, 'failure') && env.SLACK_WEBHOOK_URL != '' }}
         uses: slackapi/slack-github-action@v1
         with:
           payload: |
@@ -145,6 +150,3 @@ jobs:
                 ]
               }]
             }
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

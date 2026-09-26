@@ -1,3 +1,4 @@
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -43,6 +44,16 @@ class ReleaseArtifactsTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "unsupported release archives"):
                 prepare_release(source, source / "release")
+
+    def test_expected_archives_match_release_workflow_matrix(self) -> None:
+        # Guards against the build matrix and the publish step drifting apart,
+        # which would only surface when a real tag is pushed.
+        workflow = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "release.yml"
+        text = workflow.read_text(encoding="utf-8")
+        names = re.findall(r"^\s*archive_name:\s*(\S+)\s*$", text, re.MULTILINE)
+        exts = re.findall(r"^\s*archive_ext:\s*(\S+)\s*$", text, re.MULTILINE)
+        self.assertEqual(len(names), len(exts))
+        self.assertEqual({f"{n}.{e}" for n, e in zip(names, exts)}, EXPECTED_ARCHIVES)
 
 
 if __name__ == "__main__":

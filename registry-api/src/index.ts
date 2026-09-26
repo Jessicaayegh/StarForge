@@ -3,6 +3,7 @@ import cors from "cors";
 import helmet from "helmet";
 import compression from "compression";
 import dotenv from "dotenv";
+import path from "path";
 
 // Import API routes for the remote template registry
 import authRoutes from "./routes/auth";
@@ -30,6 +31,10 @@ app.use(
 // Body parsing middleware
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
+
+// Serve the public registry portal from the same origin as the API. Keeping
+// this relative to the compiled entrypoint also works in Docker and previews.
+app.use(express.static(path.join(__dirname, "../public")));
 
 // Request logging
 app.use((req, res, next) => {

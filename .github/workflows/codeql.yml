@@ -1,0 +1,57 @@
+# CodeQL static analysis (SAST)
+#
+# Complements the dependency-level scanners (cargo-deny in ci.yml, cargo-audit
+# in audit.yml) by analysing StarForge's own source:
+#   - rust                   the CLI and crates/ (build-mode: none, no compile)
+#   - javascript-typescript  registry-api/ and the TS client
+#   - actions                these workflow files (injection, token misuse)
+# Findings appear under Security -> Code scanning.
+
+name: CodeQL
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  schedule:
+    - cron: '17 4 * * 1' # Weekly, Monday 04:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      security-events: write  # upload SARIF results to code scanning
+      actions: read
+    # Rust extraction of a crate this large is the newest and slowest CodeQL
+    # path; keep it informational until it has a track record of finishing
+    # reliably. The other languages are expected to pass.
+    continue-on-error: ${{ matrix.language == 'rust' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [actions, javascript-typescript, rust]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:${{ matrix.language }}
