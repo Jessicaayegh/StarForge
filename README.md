@@ -664,3 +664,7 @@ pub struct TransferEvent {
 ```
 
 See `examples/binding_generator_example.md` for complete examples.
+
+### Terminal UI
+The `starforge ui` command provides a live TUI (Terminal User Interface) overview of your project, showing balances, deployed contracts, TTLs, recent transactions, and a live event tail.
+![StarForge UI](https://raw.githubusercontent.com/Nanle-code/StarForge/main/docs/ui-screenshot.png)
