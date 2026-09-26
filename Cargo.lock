@@ -3917,7 +3917,7 @@ dependencies = [
  "mockito",
  "once_cell",
  "proptest",
- "rand 0.8.8",
+ "rand 0.9.5",
  "regex",
  "reqwest",
  "rusqlite",
