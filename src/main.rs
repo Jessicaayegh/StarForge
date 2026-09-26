@@ -560,7 +560,6 @@ async fn run() {
         Commands::Lint(_) => "lint",
         Commands::Man(_) => "man",
         Commands::Diagnostics(_) => "diagnostics",
-        Commands::BugReport(_) => "bug-report",
         Commands::TemplateVcs(_) => "template-vcs",
         Commands::Perf(_) => "perf",
         Commands::AdvancedPerf(_) => "advanced-perf",

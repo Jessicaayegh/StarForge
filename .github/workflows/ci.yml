@@ -255,3 +255,20 @@ jobs:
             exit 1
           fi
           echo "Success: Hashes match."
+
+  starforge-action:
+    name: StarForge Action (self-test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      # Use install-mode: source so the action is exercised from this checkout,
+      # without depending on a published release artifact existing yet.
+      - name: Exercise the local StarForge composite action
+        uses: ./.github/actions/starforge
+        with:
+          install-mode: source
+          command: info
