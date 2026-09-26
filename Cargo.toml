@@ -135,12 +135,15 @@ minijinja = "2.24"
 serde_yaml = "0.9.34"
 async-trait = "0.1"
 futures = "0.3.33"
+ratatui = { version = "0.26", optional = true }
+crossterm = { version = "0.27", optional = true }
 
 [features]
 ai = []
 hardware-wallet = ["dep:hidapi", "dep:trezor-client"]
 unsafe-native-plugins = []
 memory-profiling = []
+ui = ["dep:ratatui", "dep:crossterm"]
 
 [dev-dependencies]
 criterion = "0.5.1"
