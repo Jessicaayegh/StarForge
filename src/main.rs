@@ -389,7 +389,6 @@ enum Commands {
     #[command(subcommand)]
     AiSecurityTraining(commands::ai_security_training::AiSecurityTrainingCommands),
 
-    /// Contract health monitoring, performance tracking, security events, alerting, and dashboard
     #[command(subcommand)]
     ContractMonitor(commands::contract_monitor::ContractMonitorCommands),
 

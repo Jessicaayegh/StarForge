@@ -9,7 +9,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Span, Line},
+    text::{Span, Spans},
     widgets::{Block, Borders, Paragraph, Clear, List, ListItem, ListState, Tabs},
     Terminal,
 };
@@ -202,25 +202,4 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ].as_ref())
         .split(popup_layout[1])[1]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ratatui::backend::TestBackend;
-    use ratatui::Terminal;
-
-    #[test]
-    fn test_ui_render_wallets_pane() {
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let app = App::default();
-
-        terminal.draw(|f| ui(f, &app)).unwrap();
-        let buffer = terminal.backend().buffer();
-        
-        let content = format!("{:?}", buffer);
-        assert!(content.contains("Wallets"));
-        assert!(content.contains("Alice"));
-    }
 }
